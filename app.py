@@ -225,7 +225,7 @@ lp_moic = df_wf['LP_Cash_Flow'][df_wf['LP_Cash_Flow'] > 0].sum() / lp_invest if 
 gp_moic = df_wf['GP_Cash_Flow'][df_wf['GP_Cash_Flow'] > 0].sum() / gp_invest if gp_invest > 0 else 0
 
 # --- 5. THE NEW UI DASHBOARD ---
-st.title("🏢 Institutional Underwriting Platform")
+st.title("🏢 Wes's Secret Underwriting Tool")
 
 if is_balanced:
     st.success(f"✅ Capital Stack Balanced | Total Sources: ${total_sources:,.0f} | Total Uses: ${total_uses:,.0f}")
