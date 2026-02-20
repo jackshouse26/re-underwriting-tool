@@ -7,7 +7,7 @@ from datetime import datetime
 import PyPDF2
 import json
 
-# --- UI UPGRADE: Page Config & Custom CSS ---
+# --- 1. UI UPGRADE: Page Config & Custom CSS ---
 st.set_page_config(page_title="Real Estate Underwriting Pro", page_icon="🏢", layout="wide")
 
 st.markdown("""
@@ -33,7 +33,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- SESSION STATE INITIALIZATION ---
-# This gives the app a "memory" so it doesn't overwrite the AI's work when you click a button
 if "rent_roll_data" not in st.session_state:
     st.session_state.rent_roll_data = pd.DataFrame([
         {"Unit Type": "1 Bed / 1 Bath", "Count": 10, "Sq Ft": 750, "Monthly Rent ($)": 1200},
@@ -41,7 +40,7 @@ if "rent_roll_data" not in st.session_state:
         {"Unit Type": "Studio", "Count": 2, "Sq Ft": 500, "Monthly Rent ($)": 900}
     ])
 
-# --- 1. UI: THE SIDEBAR (INPUTS) ---
+# --- 2. SIDEBAR INPUTS ---
 st.sidebar.title("🏢 Deal Assumptions")
 address = st.sidebar.text_input("Property Address", "11 Wall Street, New York, NY")
 
@@ -52,318 +51,142 @@ with st.sidebar.expander("🏗️ 1. Acquisition & CapEx", expanded=True):
     hold_period_yrs = st.slider("Total Hold Period (Years)", 2, 10, 5)
 
 with st.sidebar.expander("🏢 2. Operations & Exit", expanded=False):
-    st.info("💡 Base Rent is now calculated from the Rent Roll tab!")
     income_growth = st.slider("Annual Income Growth (%)", 1.0, 10.0, 3.0, 0.5) / 100
     year_1_opex = st.number_input("Year 1 OpEx ($)", value=150000, step=5000)
     expense_growth = st.slider("Annual Expense Growth (%)", 1.0, 10.0, 3.0, 0.5) / 100
-    
-    st.divider()
     has_abatement = st.checkbox("Apply Tax Abatement?")
     abatement_savings, abatement_years = 0, 0
     if has_abatement:
         abatement_savings = st.number_input("Annual Tax Savings ($)", value=50000, step=5000)
         abatement_years = st.slider("Abatement Duration (Years)", 1, 10, 5)
-    
-    st.divider()
     exit_cap_rate = st.slider("Exit Cap Rate (%)", 4.0, 10.0, 5.5, 0.1) / 100
 
 with st.sidebar.expander("🏦 3. Debt Financing", expanded=False):
-    st.write("**Construction Loan**")
-    const_ltv = st.slider("Const. Loan-to-Cost (%)", 0.0, 85.0, 65.0, 1.0) / 100
+    const_ltv = st.slider("Const. LTC (%)", 0.0, 85.0, 65.0, 1.0) / 100
     const_rate = st.slider("Const. Interest Rate (%)", 4.0, 12.0, 8.0, 0.1) / 100
-    st.divider()
-    st.write("**Permanent Loan (Refi)**")
     refi_month = st.slider("Refinance Month", const_months, hold_period_yrs * 12, const_months)
-    perm_ltv = st.slider("Perm Loan-to-Value (%)", 0.0, 80.0, 65.0, 1.0) / 100
+    perm_ltv = st.slider("Perm LTV (%)", 0.0, 80.0, 65.0, 1.0) / 100
     perm_rate = st.slider("Perm Interest Rate (%)", 3.0, 10.0, 5.5, 0.1) / 100
 
 with st.sidebar.expander("🌊 4. Equity Waterfall", expanded=False):
-    lp_contrib = st.slider("LP Equity Contribution (%)", 50, 100, 90) / 100
-    gp_contrib = 1.0 - lp_contrib
-    tier_1_hurdle = st.slider("Tier 1 Hurdle (Pref %)", 5.0, 15.0, 8.0, 0.5) / 100
-    tier_2_hurdle = st.slider("Tier 2 Hurdle (%)", 10.0, 25.0, 15.0, 0.5) / 100
+    lp_contrib = st.slider("LP Equity (%)", 50, 100, 90) / 100
+    tier_1_hurdle = st.slider("Tier 1 (Pref %)", 5.0, 15.0, 8.0, 0.5) / 100
     tier_2_gp_split = st.slider("Tier 2 GP Promote (%)", 10, 50, 20, 5) / 100
     tier_3_gp_split = st.slider("Tier 3 GP Promote (%)", 20, 60, 40, 5) / 100
 
-
-# --- 2. ENGINE: MONTHLY CASH FLOW & FINANCING ---
-def run_monthly_model(calc_year_1_gpr):
+# --- 3. REUSABLE MATH ENGINE ---
+def run_full_model(p_price, e_cap, gpr_total):
     total_months = hold_period_yrs * 12
     df = pd.DataFrame(index=range(0, total_months + 1))
-    
-    cols = ['CapEx', 'Unlevered_CF', 'Const_Draw', 'Const_Balance', 'Const_Interest', 
-            'Perm_Balance', 'Perm_Interest', 'Levered_CF']
+    cols = ['CapEx', 'Unlevered_CF', 'Const_Draw', 'Const_Balance', 'Const_Interest', 'Perm_Balance', 'Perm_Interest', 'Levered_CF']
     for c in cols: df[c] = 0.0
-        
-    total_cost = purchase_price + capex_budget
-    const_loan_max = total_cost * const_ltv
-    initial_equity = total_cost - const_loan_max
     
-    total_sources = const_loan_max + initial_equity
-    sources_uses_match = abs(total_sources - total_cost) < 1
+    total_cost = p_price + capex_budget
+    loan_max = total_cost * const_ltv
+    initial_equity = total_cost - loan_max
     
-    df.loc[0, 'Unlevered_CF'] = -purchase_price
+    df.loc[0, 'Unlevered_CF'] = -p_price
     df.loc[0, 'Levered_CF'] = -initial_equity
     
-    monthly_capex = capex_budget / const_months if const_months > 0 else 0
-    monthly_const_draw = (const_loan_max - (purchase_price * const_ltv)) / const_months if const_months > 0 else 0
-    
-    current_const_balance = purchase_price * const_ltv
-    df.loc[0, 'Const_Balance'] = current_const_balance
+    curr_const_bal = p_price * const_ltv
+    m_capex = capex_budget / const_months if const_months > 0 else 0
+    m_draw = (loan_max - (p_price * const_ltv)) / const_months if const_months > 0 else 0
     
     for m in range(1, total_months + 1):
-        current_gpr = calc_year_1_gpr * ((1 + income_growth) ** (m/12))
-        current_opex = year_1_opex * ((1 + expense_growth) ** (m/12))
+        noi = ((gpr_total * ((1 + income_growth)**(m/12))) - (year_1_opex * ((1 + expense_growth)**(m/12)))) / 12
+        if has_abatement and m <= (abatement_years * 12): noi += (abatement_savings / 12)
         
-        if has_abatement and m <= (abatement_years * 12):
-            current_opex -= abatement_savings
-            
-        noi = (current_gpr - current_opex) / 12
-        
-        capex = monthly_capex if m <= const_months else 0
-        df.loc[m, 'CapEx'] = -capex
+        capex = m_capex if m <= const_months else 0
         df.loc[m, 'Unlevered_CF'] = noi - capex
         
         if m <= refi_month:
-            interest = current_const_balance * (const_rate / 12)
-            draw = monthly_const_draw if m <= const_months else 0
-            current_const_balance += draw
-            
-            df.loc[m, 'Const_Draw'] = draw
-            df.loc[m, 'Const_Interest'] = -interest
-            df.loc[m, 'Const_Balance'] = current_const_balance
+            interest = curr_const_bal * (const_rate / 12)
+            draw = m_draw if m <= const_months else 0
+            curr_const_bal += draw
+            df.loc[m, 'Const_Balance'] = curr_const_bal
             df.loc[m, 'Levered_CF'] = noi - capex + draw - interest
-        
         elif m == refi_month + 1:
-            forward_12m_noi = sum([ (calc_year_1_gpr * ((1 + income_growth) ** ((m+i)/12)) - 
-                                   (year_1_opex * ((1 + expense_growth) ** ((m+i)/12)))) / 12 for i in range(12)])
-            property_value = forward_12m_noi / exit_cap_rate
-            perm_loan_amount = property_value * perm_ltv
-            
-            net_refi_proceeds = perm_loan_amount - current_const_balance
-            
-            df.loc[m, 'Perm_Balance'] = perm_loan_amount
-            interest = perm_loan_amount * (perm_rate / 12)
-            df.loc[m, 'Perm_Interest'] = -interest
-            
-            df.loc[m, 'Levered_CF'] = noi + net_refi_proceeds - interest
-            current_const_balance = 0 
+            val = (noi * 12) / e_cap
+            perm_amt = val * perm_ltv
+            df.loc[m, 'Levered_CF'] = noi + (perm_amt - curr_const_bal) - (perm_amt * perm_rate / 12)
+            df.loc[m, 'Perm_Balance'] = perm_amt
+            curr_const_bal = 0
         else:
-            perm_loan_amount = df.loc[m-1, 'Perm_Balance']
-            interest = perm_loan_amount * (perm_rate / 12)
-            df.loc[m, 'Perm_Balance'] = perm_loan_amount
-            df.loc[m, 'Perm_Interest'] = -interest
-            df.loc[m, 'Levered_CF'] = noi - interest
-            
-    exit_m = total_months
-    forward_12m_noi = sum([ (calc_year_1_gpr * ((1 + income_growth) ** ((exit_m+i)/12)) - 
-                           (year_1_opex * ((1 + expense_growth) ** ((exit_m+i)/12)))) / 12 for i in range(12)])
-    gross_sales_price = forward_12m_noi / exit_cap_rate
-    net_proceeds = gross_sales_price * 0.98 
-    
-    df.loc[exit_m, 'Unlevered_CF'] += net_proceeds
-    df.loc[exit_m, 'Levered_CF'] += (net_proceeds - df.loc[exit_m, 'Perm_Balance'])
-    
-    return df, initial_equity, total_cost, total_sources, sources_uses_match
+            p_bal = df.loc[m-1, 'Perm_Balance']
+            df.loc[m, 'Perm_Balance'] = p_bal
+            df.loc[m, 'Levered_CF'] = noi - (p_bal * perm_rate / 12)
 
-# --- 3. ENGINE: MONTHLY WATERFALL ---
-def run_monthly_waterfall(df, total_equity):
-    df['LP_Cash_Flow'] = 0.0
-    df['GP_Cash_Flow'] = 0.0
+    # Exit Sale
+    exit_val = (df.loc[total_months, 'Unlevered_CF'] * 12) / e_cap
+    df.loc[total_months, 'Unlevered_CF'] += (exit_val * 0.98)
+    df.loc[total_months, 'Levered_CF'] += (exit_val * 0.98 - df.loc[total_months, 'Perm_Balance'])
     
-    lp_invest = total_equity * lp_contrib
-    gp_invest = total_equity * gp_contrib
-    
-    df.loc[0, 'LP_Cash_Flow'] = -lp_invest
-    df.loc[0, 'GP_Cash_Flow'] = -gp_invest
-    
-    t1_bal = total_equity
-    t2_bal = total_equity
-    
-    m_hurdle_1 = (1 + tier_1_hurdle)**(1/12) - 1
-    m_hurdle_2 = (1 + tier_2_hurdle)**(1/12) - 1
+    lev_irr = (1 + npf.irr(df['Levered_CF']))**12 - 1
+    unlev_irr = (1 + npf.irr(df['Unlevered_CF']))**12 - 1
+    moic = df['Levered_CF'][df['Levered_CF'] > 0].sum() / initial_equity
+    return lev_irr, unlev_irr, moic, df, initial_equity, total_cost
 
-    for m in range(1, len(df)):
-        cash = df.loc[m, 'Levered_CF']
-        if cash <= 0: continue
-            
-        t1_bal = t1_bal * (1 + m_hurdle_1)
-        if cash <= t1_bal:
-            t1_dist = cash; cash = 0
-        else:
-            t1_dist = t1_bal; cash -= t1_bal
-        t1_bal -= t1_dist
-        
-        lp_t1 = t1_dist * lp_contrib; gp_t1 = t1_dist * gp_contrib
-        
-        t2_bal = t2_bal * (1 + m_hurdle_2) - t1_dist
-        if t2_bal > 0 and cash > 0:
-            if cash <= t2_bal:
-                t2_dist = cash; cash = 0
-            else:
-                t2_dist = t2_bal; cash -= t2_bal
-            t2_bal -= t2_dist
-        else:
-            t2_dist = 0
-            
-        lp_t2 = t2_dist * (1 - tier_2_gp_split); gp_t2 = t2_dist * tier_2_gp_split
-        
-        t3_dist = cash
-        lp_t3 = t3_dist * (1 - tier_3_gp_split); gp_t3 = t3_dist * tier_3_gp_split
-        
-        df.loc[m, 'LP_Cash_Flow'] = lp_t1 + lp_t2 + lp_t3
-        df.loc[m, 'GP_Cash_Flow'] = gp_t1 + gp_t2 + gp_t3
-
-    return df, lp_invest, gp_invest
-
-# --- 4. THE UI DASHBOARD & EXECUTION ---
-st.title("🏢 Wes's Secret Underwriting Tool")
-
-tab1, tab2, tab3 = st.tabs(["📊 Executive Dashboard", "🗓️ Monthly Pro Forma", "🔑 Rent Roll"])
+# --- 4. TABS & UI EXECUTION ---
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "🗓️ Pro Forma", "🔑 Rent Roll", "📈 Sensitivity"])
 
 with tab3:
     col_a, col_b = st.columns([1, 2])
-    
     with col_a:
         st.subheader("📄 Rent Roll Extraction")
-        st.write("Upload a broker PDF. Jack will extract, group, and average the unit data automatically.")
         uploaded_file = st.file_uploader("Upload PDF Rent Roll", type="pdf")
-        
-        if uploaded_file is not None:
-            if st.button("Extract Data", type="primary"):
-                if "GEMINI_API_KEY" in st.secrets:
-                    with st.spinner("Reading PDF and extracting data..."):
-                        # Read PDF text
-                        reader = PyPDF2.PdfReader(uploaded_file)
-                        pdf_text = ""
-                        for page in reader.pages:
-                            pdf_text += page.extract_text() + "\n"
-                        
-                        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-                        model = genai.GenerativeModel('gemini-2.5-flash')
-                        
-                        prompt = f"""
-                        You are a real estate analyst. Extract the rent roll data from the following PDF text. 
-                        Group the units by "Unit Type" (e.g., 1 Bed / 1 Bath, Studio, 2 Bed). 
-                        For each group, provide the "Count" (total number of units of that type), the average "Sq Ft", and the average "Monthly Rent ($)".
-                        
-                        Return EXACTLY a raw JSON array of objects. Do not include markdown blocks like ```json.
-                        Example format: [{{"Unit Type": "1 Bed", "Count": 10, "Sq Ft": 750, "Monthly Rent ($)": 1500}}]
-                        
-                        Text:
-                        {pdf_text}
-                        """
-                        try:
-                            response = model.generate_content(prompt)
-                            raw_json = response.text.strip()
-                            if raw_json.startswith("```json"):
-                                raw_json = raw_json[7:-3]
-                            elif raw_json.startswith("```"):
-                                raw_json = raw_json[3:-3]
-                                
-                            extracted_data = json.loads(raw_json)
-                            # Update the app's memory with the new data!
-                            st.session_state.rent_roll_data = pd.DataFrame(extracted_data)
-                            st.rerun()
-                        except Exception as e:
-                            st.error("Failed to parse the PDF cleanly. Ensure the document is readable text.")
-                else:
-                    st.warning("⚠️ Add GEMINI_API_KEY to Streamlit Secrets to use AI Extraction.")
-
+        if uploaded_file and st.button("Extract Data with AI", type="primary"):
+            if "GEMINI_API_KEY" in st.secrets:
+                with st.spinner("Extracting..."):
+                    reader = PyPDF2.PdfReader(uploaded_file)
+                    pdf_text = "\n".join([page.extract_text() for page in reader.pages])
+                    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                    model = genai.GenerativeModel('gemini-2.5-flash')
+                    prompt = f"Extract rent roll data to JSON list of objects: Unit Type, Count, Sq Ft, Monthly Rent ($). Text: {pdf_text}"
+                    response = model.generate_content(prompt)
+                    raw_json = response.text.replace("```json", "").replace("```", "").strip()
+                    st.session_state.rent_roll_data = pd.DataFrame(json.loads(raw_json))
+                    st.rerun()
     with col_b:
-        st.subheader("🔑 Interactive Rent Roll")
         edited_rr = st.data_editor(st.session_state.rent_roll_data, num_rows="dynamic", use_container_width=True)
-        
         dynamic_gpr = (edited_rr["Count"] * edited_rr["Monthly Rent ($)"] * 12).sum()
-        st.info(f"**Total Calculated Year 1 Gross Potential Rent (GPR):** \${dynamic_gpr:,.0f}")
 
-# RUN THE MATH ENGINE USING THE NEW DYNAMIC GPR
-df_model, initial_equity, total_uses, total_sources, is_balanced = run_monthly_model(dynamic_gpr)
-df_wf, lp_invest, gp_invest = run_monthly_waterfall(df_model, initial_equity)
-
-try:
-    unlev_irr = (1 + npf.irr(df_wf['Unlevered_CF']))**12 - 1
-    lev_irr = (1 + npf.irr(df_wf['Levered_CF']))**12 - 1
-    lp_irr = (1 + npf.irr(df_wf['LP_Cash_Flow']))**12 - 1
-    gp_irr = (1 + npf.irr(df_wf['GP_Cash_Flow']))**12 - 1
-except:
-    unlev_irr, lev_irr, lp_irr, gp_irr = 0, 0, 0, 0
-
-unlev_moic = df_wf['Unlevered_CF'][df_wf['Unlevered_CF'] > 0].sum() / total_uses
-lev_moic = df_wf['Levered_CF'][df_wf['Levered_CF'] > 0].sum() / initial_equity
-lp_moic = df_wf['LP_Cash_Flow'][df_wf['LP_Cash_Flow'] > 0].sum() / lp_invest if lp_invest > 0 else 0
-gp_moic = df_wf['GP_Cash_Flow'][df_wf['GP_Cash_Flow'] > 0].sum() / gp_invest if gp_invest > 0 else 0
+# Run deal math for current inputs
+lev_irr, unlev_irr, moic, df_wf, init_eq, tot_cost = run_full_model(purchase_price, exit_cap_rate, dynamic_gpr)
 
 with tab1:
-    if is_balanced:
-        st.success(f"✅ Capital Stack Balanced | Total Sources: ${total_sources:,.0f} | Total Uses: ${total_uses:,.0f}")
-    else:
-        st.error(f"❌ Warning: Sources (${total_sources:,.0f}) do not match Uses (${total_uses:,.0f}).")
-        
     st.subheader("Return Matrix")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("1. Unlevered Deal", f"{unlev_irr:.2%}", f"{unlev_moic:.2f}x MoIC")
-    col2.metric("2. Levered Deal", f"{lev_irr:.2%}", f"{lev_moic:.2f}x MoIC")
-    col3.metric("3. LP Returns", f"{lp_irr:.2%}", f"{lp_moic:.2f}x MoIC")
-    col4.metric("4. GP Returns", f"{gp_irr:.2%}", f"{gp_moic:.2f}x MoIC")
-
-    st.divider()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Unlevered IRR", f"{unlev_irr:.2%}")
+    c2.metric("Levered IRR", f"{lev_irr:.2%}")
+    c3.metric("Equity Multiple", f"{moic:.2f}x")
     
+    st.divider()
     col_chart, col_map = st.columns([2, 1])
     with col_chart:
-        st.write("**LP vs GP Cash Flow Timeline**")
-        st.bar_chart(df_wf[['LP_Cash_Flow', 'GP_Cash_Flow']])
-    
+        st.bar_chart(df_wf['Levered_CF'])
     with col_map:
-        st.write("**Property Location**")
         try:
-            geolocator = Nominatim(user_agent="re_underwriting_app")
-            location = geolocator.geocode(address)
-            if location:
-                map_data = pd.DataFrame({'lat': [location.latitude], 'lon': [location.longitude]})
-                st.map(map_data, zoom=14)
-        except:
-            st.info("Map unavailable. Check address.")
+            geolocator = Nominatim(user_agent="re_pro")
+            loc = geolocator.geocode(address)
+            if loc: st.map(pd.DataFrame({'lat':[loc.latitude], 'lon':[loc.longitude]}), zoom=14)
+        except: st.info("Map unavailable.")
 
     st.divider()
-    
-    st.subheader("Investment Memo")
-    if "GEMINI_API_KEY" in st.secrets:
-        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        if st.button("Generate Investment Committee Memo", type="primary"):
-            with st.spinner("Jack is analyzing the underwriting and writing the memo..."):
+    if st.button("Generate Investment Memo", type="primary"):
+        if "GEMINI_API_KEY" in st.secrets:
+            with st.spinner("Jack is analyzing..."):
+                genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
                 model = genai.GenerativeModel('gemini-2.5-flash')
-                current_date = datetime.now().strftime("%B %d, %Y")
-                abatement_text = f"The deal includes a tax abatement saving ${abatement_savings:,.0f}/year for {abatement_years} years." if has_abatement else "No tax abatements are modeled."
-                
-                prompt = f"""
-                Act as a Principal at a Private Equity Real Estate firm. Write a highly professional, 3-paragraph Investment Committee (IC) Memo for a property located at {address}. The date is {current_date}.
-                
-                Data: Purchase: ${purchase_price:,.0f} | CapEx: ${capex_budget:,.0f} | Capitalization: ${total_sources:,.0f} | Const Loan: {const_ltv*100}% LTC at {const_rate*100}% | Refi: Month {refi_month} at {perm_ltv*100}% LTV and {perm_rate*100}%. {abatement_text}
-                
-                Returns: Deal Levered IRR: {lev_irr:.2%} | LP IRR: {lp_irr:.2%} | GP IRR: {gp_irr:.2%}
-                
-                Format:
-                **1. Executive Summary & Capital Stack:** Context, location, and capitalization.
-                **2. Business Plan & Financing:** Transition from construction to permanent financing, plus abatement impact.
-                **3. Return Profile & Recommendation:** LP vs GP alignment, leverage impact, and Go/No-Go recommendation.
-                
-                CRITICAL INSTRUCTION: Do NOT use the "$" symbol anywhere in your response. Always use "USD" instead.
-                """
-                
-                response = model.generate_content(prompt)
-                st.info(response.text)
-    else:
-        st.warning("⚠️ Add GEMINI_API_KEY to Streamlit Secrets to use AI.")
+                prompt = f"Write 3-para IC Memo for {address}. Date: {datetime.now().strftime('%B %d, %Y')}. Purchase: USD {purchase_price}. Levered IRR: {lev_irr:.2%}. DO NOT USE $ SYMBOL, use USD."
+                st.info(model.generate_content(prompt).text)
+
+with tab4:
+    st.subheader("📈 Levered IRR Sensitivity Analysis")
+    prices = [purchase_price * f for f in [0.9, 0.95, 1.0, 1.05, 1.1]]
+    caps = [exit_cap_rate + offset for offset in [-0.01, -0.005, 0, 0.005, 0.01]]
+    matrix = [[f"{run_full_model(p, c, dynamic_gpr)[0]:.2%}" for c in caps] for p in prices]
+    sens_df = pd.DataFrame(matrix, index=[f"USD {p:,.0f}" for p in prices], columns=[f"{c:.2%}" for c in caps])
+    st.table(sens_df)
 
 with tab2:
-    st.subheader("🗓️ Complete Monthly Pro Forma")
-    
-    @st.cache_data
-    def convert_df(df):
-        return df.to_csv(index=True).encode('utf-8')
-
-    csv_data = convert_df(df_wf)
-    st.download_button(label="📥 Export to Excel (CSV)", data=csv_data, file_name='Deal_Underwriting_Export.csv', mime='text/csv')
-    
-    st.dataframe(df_wf.style.format("${:,.0f}"), height=600)
+    st.dataframe(df_wf.style.format("USD {:,.0f}"), height=600)
