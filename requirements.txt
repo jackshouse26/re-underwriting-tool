@@ -2,3 +2,4 @@ streamlit
 pandas
 numpy-financial
 geopy
+google-generativeai
