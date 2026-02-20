@@ -36,13 +36,20 @@ else:
 if "saved_deals" not in st.session_state: st.session_state.saved_deals = []
 if "memo_text" not in st.session_state: st.session_state.memo_text = ""
 
-# NEW: Master GPR state and God Mode states
-if "active_gpr" not in st.session_state: st.session_state.active_gpr = 950000 # Healthy default for a $5M building
+# Master GPR state and God Mode states
+if "active_gpr" not in st.session_state: st.session_state.active_gpr = 950000
 if "om_address" not in st.session_state: st.session_state.om_address = "11 Wall Street, New York, NY"
 if "om_price" not in st.session_state: st.session_state.om_price = 5000000
 if "om_capex" not in st.session_state: st.session_state.om_capex = 1200000
 if "om_opex" not in st.session_state: st.session_state.om_opex = 150000
 if "om_cap" not in st.session_state: st.session_state.om_cap = 5.5
+
+# OpEx line item defaults (roughly match $150k om_opex at $950k GPR)
+if "opex_prop_tax"    not in st.session_state: st.session_state.opex_prop_tax    = 52000
+if "opex_insurance"   not in st.session_state: st.session_state.opex_insurance   = 12000
+if "opex_maintenance" not in st.session_state: st.session_state.opex_maintenance  = 28000
+if "opex_mgmt_pct"    not in st.session_state: st.session_state.opex_mgmt_pct    = 4.0   # % of GPR
+if "opex_utilities"   not in st.session_state: st.session_state.opex_utilities    = 20000
 
 API_KEY = st.secrets["GEMINI_API_KEY"] if "GEMINI_API_KEY" in st.secrets else None
 
@@ -103,12 +110,22 @@ with st.sidebar.expander("🏗️ 1. Acquisition & CapEx", expanded=True):
 
 with st.sidebar.expander("🏢 2. Operations & Exit", expanded=False):
     st.info("💡 Edit this manually, OR send data here from the Rent Roll tab!")
-    # NEW: The Master GPR Input (tied to our session state)
     active_gpr = st.number_input("Year 1 Gross Potential Rent ($)", key="active_gpr", step=10000)
-    
+
     use_market_rents = st.checkbox("📈 Underwrite to Market Rents?", value=False)
     income_growth = st.slider("Annual Income Growth (%)", 1.0, 10.0, 3.0, 0.5) / 100
-    year_1_opex = st.number_input("Year 1 OpEx ($)", value=st.session_state.om_opex, step=5000)
+
+    st.caption("**📋 OpEx Line Items**")
+    opex_prop_tax    = st.number_input("Property Tax ($)",         value=st.session_state.opex_prop_tax,    step=1000)
+    opex_insurance   = st.number_input("Insurance ($)",            value=st.session_state.opex_insurance,   step=1000)
+    opex_maintenance = st.number_input("Maintenance & Repairs ($)", value=st.session_state.opex_maintenance, step=1000)
+    opex_mgmt_pct    = st.slider("Management Fee (% of GPR)", 2.0, 8.0, st.session_state.opex_mgmt_pct, 0.5)
+    opex_utilities   = st.number_input("Utilities ($)",            value=st.session_state.opex_utilities,   step=1000)
+
+    opex_mgmt_fee = int(st.session_state.active_gpr * opex_mgmt_pct / 100)
+    year_1_opex   = opex_prop_tax + opex_insurance + opex_maintenance + opex_mgmt_fee + opex_utilities
+    st.info(f"**Total Year 1 OpEx: ${year_1_opex:,}**  _(Mgmt: ${opex_mgmt_fee:,})_  \n_OM ref: ${st.session_state.om_opex:,}_")
+
     expense_growth = st.slider("Annual Expense Growth (%)", 1.0, 10.0, 3.0, 0.5) / 100
     has_abatement = st.checkbox("Apply Tax Abatement?")
     abatement_savings = st.number_input("Annual Tax Savings ($)", value=50000, step=5000) if has_abatement else 0
@@ -126,6 +143,13 @@ with st.sidebar.expander("🏦 3. Debt Financing", expanded=False):
     closing_costs_pct = st.slider("Acquisition Closing Costs (%)", 0.0, 3.0, 1.5, 0.1) / 100
     loan_orig_fee_pct = st.slider("Loan Origination Fee (%)", 0.0, 3.0, 1.0, 0.1) / 100
     exit_costs_pct    = st.slider("Exit Transaction Costs (%)", 0.5, 4.0, 2.0, 0.1) / 100
+
+with st.sidebar.expander("🤝 4. GP / LP Waterfall", expanded=False):
+    st.caption("Pref → catch-up → promote structure applied to levered cash flows at exit.")
+    gp_commit_pct = st.slider("GP Equity Commitment (%)", 5, 30, 10, 5) / 100
+    pref_rate     = st.slider("LP Preferred Return (%)", 4.0, 12.0, 8.0, 0.5) / 100
+    promote_rate  = st.slider("GP Promote / Carry (%)", 10, 30, 20, 5) / 100
+    hurdle_irr    = st.slider("Promote Hurdle IRR (%)", 10.0, 25.0, 15.0, 0.5) / 100
 
 assumptions = {
     "purchase_price": purchase_price, "capex_budget": capex_budget, "const_months": const_months,
@@ -161,10 +185,21 @@ with tab3:
             st.session_state.active_gpr = int(dynamic_gpr)
             st.rerun()
 
-# RUN ENGINE VIA MODULE (Now using the sidebar's active_gpr!)
+# RUN ENGINE
 lev_irr, dscr, df_wf, init_eq, tot_cost, unlev_irr = math_engine.run_model_engine(assumptions, st.session_state.active_gpr)
 max_debt_service = df_wf['Debt_Service'].max() * 12
 breakeven_occ = (max_debt_service + year_1_opex) / st.session_state.active_gpr if st.session_state.active_gpr > 0 else 0
+
+# GP/LP WATERFALL
+wf = math_engine.compute_gp_lp_waterfall(
+    df_wf['Levered_CF'].values,
+    init_eq,
+    hold_period_yrs,
+    gp_commit_pct=gp_commit_pct,
+    pref_rate=pref_rate,
+    promote_rate=promote_rate,
+    hurdle_irr=hurdle_irr,
+)
 
 # MOIC: total equity returned / total equity invested
 _lev = df_wf['Levered_CF']
@@ -254,6 +289,50 @@ with tab1:
         h5.warning(f"⚠️ **Breakeven Occ.**\n\n{breakeven_occ:.1%} > 85%")
 
     st.divider()
+    st.subheader("💰 GP / LP Waterfall")
+    wc1, wc2 = st.columns(2)
+    with wc1:
+        st.caption("**Limited Partner (LP)**")
+        st.metric("LP IRR",          f"{wf['lp_irr']:.2%}"         if wf['lp_irr']  > -1 else "Loss")
+        st.metric("LP MOIC",         f"{wf['lp_moic']:.2f}x")
+        st.metric("LP Equity In",    f"${wf['lp_invested']:,.0f}")
+        st.metric("LP Total Return", f"${wf['lp_total_return']:,.0f}")
+    with wc2:
+        st.caption("**General Partner (GP)**")
+        st.metric("GP IRR",           f"{wf['gp_irr']:.2%}"          if wf['gp_irr']  > -1 else "Loss")
+        st.metric("GP MOIC",          f"{wf['gp_moic']:.2f}x")
+        st.metric("GP Equity In",     f"${wf['gp_invested']:,.0f}")
+        st.metric("GP Promote Earned",f"${wf['gp_promote_earned']:,.0f}")
+
+    with st.expander("📊 Waterfall Tier Breakdown"):
+        tier_df = pd.DataFrame({
+            "Tier":      ["T1 — Return of Capital", "T2 — LP Preferred Return",
+                          "T3 — GP Catch-Up",       "T4 — LP Promote Split", "T4 — GP Promote Split"],
+            "Recipient": ["LP + GP pro-rata", "LP only", "GP only (100%)", "LP", "GP"],
+            "Amount":    [f"${wf['tier_roc']:,.0f}", f"${wf['tier_lp_pref']:,.0f}",
+                          f"${wf['tier_gp_catchup']:,.0f}",
+                          f"${wf['tier_promote_lp']:,.0f}", f"${wf['tier_promote_gp']:,.0f}"],
+        })
+        st.table(tier_df.set_index("Tier"))
+        if wf['hurdle_cleared']:
+            st.success(f"✅ Hurdle cleared — promote of {promote_rate:.0%} applied on residual proceeds")
+        else:
+            st.warning(f"⚠️ Hurdle NOT cleared — residual split reverts to pro-rata (no GP promote)")
+        if not wf['pref_fully_paid']:
+            st.error(f"🚨 LP {pref_rate:.0%} preferred return NOT fully covered by exit proceeds")
+
+    st.divider()
+    # OpEx line item reference
+    with st.expander("📋 Year 1 OpEx Breakdown"):
+        opex_df = pd.DataFrame({
+            "Line Item": ["Property Tax", "Insurance", "Maintenance & Repairs",
+                          f"Mgmt Fee ({opex_mgmt_pct:.1f}% of GPR)", "Utilities", "**Total**"],
+            "Amount":    [f"${opex_prop_tax:,}", f"${opex_insurance:,}", f"${opex_maintenance:,}",
+                          f"${opex_mgmt_fee:,}", f"${opex_utilities:,}", f"**${year_1_opex:,}**"],
+        })
+        st.table(opex_df.set_index("Line Item"))
+
+    st.divider()
     col_chart, col_map = st.columns([2, 1])
     with col_chart:
         st.bar_chart(df_wf['Levered_CF'])
@@ -295,8 +374,9 @@ with tab4:
 
     st.divider()
     st.subheader("🎲 Monte Carlo Risk Simulation")
+    st.caption("250 iterations with **correlated shocks** — rising rates push cap rates up and compress growth (Cholesky decomposition on σ: cap ±50bps, rate ±50bps, growth ±100bps).")
     if st.button("Run Monte Carlo Simulation", type="primary"):
-        with st.spinner("Running 250 deal simulations..."):
+        with st.spinner("Running 250 correlated deal simulations..."):
             import numpy as np
             sim_results = math_engine.run_monte_carlo(assumptions, st.session_state.active_gpr, iterations=250)
             
