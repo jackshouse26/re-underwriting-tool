@@ -40,6 +40,10 @@ if "rent_roll_data" not in st.session_state:
         {"Unit Type": "Studio", "Count": 2, "Sq Ft": 500, "Monthly Rent ($)": 900}
     ])
 
+# New state to store deal comparisons
+if "saved_deals" not in st.session_state:
+    st.session_state.saved_deals = []
+
 # --- 1. UI: THE SIDEBAR (INPUTS) ---
 st.sidebar.title("🏢 Deal Assumptions")
 address = st.sidebar.text_input("Property Address", "11 Wall Street, New York, NY")
@@ -93,27 +97,28 @@ def run_model_engine(p_price, e_cap, gpr_total):
     total_cost = p_price + capex_budget
     loan_max = total_cost * const_ltv
     initial_equity = total_cost - loan_max
-    df.loc[0, 'Unlevered_CF'] = -p_price
+    
+    df.loc[0, 'Unlevered_CF'] = -total_cost
     df.loc[0, 'Levered_CF'] = -initial_equity
     
     current_bal = p_price * const_ltv
-    m_capex = capex_budget / const_months if const_months > 0 else 0
     m_draw = (loan_max - (p_price * const_ltv)) / const_months if const_months > 0 else 0
+    
+    last_noi = 0
     
     for m in range(1, total_months + 1):
         noi = ((gpr_total * ((1 + income_growth)**(m/12))) - (year_1_opex * ((1 + expense_growth)**(m/12)))) / 12
         if has_abatement and m <= (abatement_years * 12): noi += (abatement_savings / 12)
         
-        capex = m_capex if m <= const_months else 0
-        df.loc[m, 'Unlevered_CF'] = noi - capex
+        last_noi = noi
+        df.loc[m, 'Unlevered_CF'] = noi
         
         if m <= refi_month:
             ds = current_bal * (const_rate / 12)
             draw = m_draw if m <= const_months else 0
             current_bal += draw
-            df.loc[m, 'Const_Interest'] = -ds
             df.loc[m, 'Debt_Service'] = ds
-            df.loc[m, 'Levered_CF'] = noi - capex + draw - ds
+            df.loc[m, 'Levered_CF'] = noi + draw - ds
         elif m == refi_month + 1:
             p_val = (noi * 12) / e_cap
             p_amt = p_val * perm_ltv
@@ -127,16 +132,18 @@ def run_model_engine(p_price, e_cap, gpr_total):
             df.loc[m, 'Perm_Balance'], df.loc[m, 'Debt_Service'] = p_bal, ds
             df.loc[m, 'Levered_CF'] = noi - ds
 
-    exit_val = (df.loc[total_months, 'Unlevered_CF'] * 12 / e_cap) * 0.98
+    exit_noi = ((gpr_total * ((1 + income_growth)**((total_months+1)/12))) - (year_1_opex * ((1 + expense_growth)**((total_months+1)/12))))
+    exit_val = (exit_noi / e_cap) * 0.98
+    
     df.loc[total_months, 'Unlevered_CF'] += exit_val
     df.loc[total_months, 'Levered_CF'] += (exit_val - df.loc[total_months, 'Perm_Balance'])
     
     try:
-        irr = (1 + npf.irr(df['Levered_CF']))**12 - 1
-        if pd.isna(irr): irr = 0.0
-    except: irr = 0.0
+        irr = (1 + npf.irr(df['Levered_CF'], guess=0.1))**12 - 1
+        if pd.isna(irr) or irr < -0.99: irr = -1.0
+    except: irr = -1.0
     
-    dscr = (noi * 12) / (df['Debt_Service'].max() * 12) if df['Debt_Service'].max() > 0 else 0
+    dscr = (last_noi * 12) / (df['Debt_Service'].max() * 12) if df['Debt_Service'].max() > 0 else 0
     return irr, dscr, df, initial_equity, total_cost
 
 # --- 3. UI TABS & EXECUTION ---
@@ -167,13 +174,37 @@ lev_irr, dscr, df_wf, init_eq, tot_cost = run_model_engine(purchase_price, exit_
 with tab1:
     st.subheader("Key Deal Metrics")
     c1, c2, c3 = st.columns(3)
-    c1.metric("Levered IRR", f"{lev_irr:.2%}")
-    c2.metric("Year 1 DSCR", f"{dscr:.2f}x", delta="Lender Target: 1.25x")
-    c3.metric("Initial Equity", f"USD {init_eq:,.0f}")
+    c1.metric("Levered IRR", f"{lev_irr:.2%}" if lev_irr > -1 else "Loss")
+    c2.metric("Year 1 DSCR", f"{dscr:.2f}x", delta="Target: 1.25x")
+    c3.metric("Equity Required", f"USD {init_eq:,.0f}")
     
+    # NEW: Deal Comparison Logic
+    st.divider()
+    col_save, col_clear = st.columns([1, 4])
+    with col_save:
+        if st.button("💾 Bookmark Deal"):
+            new_deal = {
+                "Address": address,
+                "Price": f"USD {purchase_price:,.0f}",
+                "IRR": f"{lev_irr:.2%}",
+                "DSCR": f"{dscr:.2f}x",
+                "Equity": f"USD {init_eq:,.0f}"
+            }
+            st.session_state.saved_deals.append(new_deal)
+            st.toast("Deal bookmarked for comparison!")
+
+    if st.session_state.saved_deals:
+        st.write("### ⚖️ Side-by-Side Comparison")
+        comparison_df = pd.DataFrame(st.session_state.saved_deals)
+        st.table(comparison_df)
+        if st.button("🗑️ Clear All Saved Deals"):
+            st.session_state.saved_deals = []
+            st.rerun()
+
     st.divider()
     col_chart, col_map = st.columns([2, 1])
     with col_chart:
+        st.write("**Cash Flow Timeline**")
         st.bar_chart(df_wf['Levered_CF'])
     with col_map:
         try:
@@ -196,8 +227,16 @@ with tab4:
     st.write("Cross-tab of Purchase Price vs Exit Cap Rate")
     prices = [purchase_price * f for f in [0.9, 0.95, 1.0, 1.05, 1.1]]
     caps = [exit_cap_rate + offset for offset in [-0.01, -0.005, 0, 0.005, 0.01]]
-    matrix = [[f"{run_model_engine(p, c, dynamic_gpr)[0]:.2%}" if run_model_engine(p, c, dynamic_gpr)[0] > -0.99 else "Neg." for c in caps] for p in prices]
-    st.table(pd.DataFrame(matrix, index=[f"USD {p:,.0f}" for p in prices], columns=[f"{c:.2%}" for c in caps]))
+    
+    matrix_data = []
+    for p in prices:
+        row = []
+        for c in caps:
+            val, _, _, _, _ = run_model_engine(p, c, dynamic_gpr)
+            row.append(f"{val:.2%}" if val > -0.99 else "Loss")
+        matrix_data.append(row)
+        
+    st.table(pd.DataFrame(matrix_data, index=[f"USD {p:,.0f}" for p in prices], columns=[f"{c:.2%}" for c in caps]))
 
 with tab2:
     st.dataframe(df_wf.style.format("USD {:,.0f}"), height=600)
