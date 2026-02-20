@@ -1,8 +1,12 @@
 import streamlit as st
 import pandas as pd
 import numpy_financial as npf
+from geopy.geocoders import Nominatim
 
 # --- 1. UI: THE SIDEBAR (INPUTS) ---
+st.sidebar.header("Property Details")
+address = st.sidebar.text_input("Property Address", "11 Wall Street, New York, NY")
+
 st.sidebar.header("Deal Assumptions")
 purchase_price = st.sidebar.number_input("Purchase Price ($)", value=5000000, step=100000)
 capex_budget = st.sidebar.number_input("CapEx Budget ($)", value=350000, step=50000)
@@ -49,7 +53,7 @@ def run_model():
     df.loc[hold_period, 'Levered_CF'] += (net_sales_proceeds - loan_amount)
     
     df.fillna(0, inplace=True)
-    return df, total_equity
+    return df, total_equity, annual_interest
 
 def calculate_waterfall(df, total_equity):
     df['LP_Cash_Flow'] = 0.0
@@ -69,39 +73,32 @@ def calculate_waterfall(df, total_equity):
         if cash <= 0:
             continue
             
-        # TIER 1: Return of Capital + Pref
+        # TIER 1
         t1_balance = t1_balance * (1 + tier_1_hurdle)
         if cash <= t1_balance:
-            t1_dist = cash
-            cash = 0
+            t1_dist = cash; cash = 0
         else:
-            t1_dist = t1_balance
-            cash -= t1_balance
+            t1_dist = t1_balance; cash -= t1_balance
         t1_balance -= t1_dist
         
-        lp_t1 = t1_dist * lp_contrib
-        gp_t1 = t1_dist * gp_contrib
+        lp_t1 = t1_dist * lp_contrib; gp_t1 = t1_dist * gp_contrib
         
-        # TIER 2: First Promote
+        # TIER 2
         t2_balance = t2_balance * (1 + tier_2_hurdle) - t1_dist
         if t2_balance > 0 and cash > 0:
             if cash <= t2_balance:
-                t2_dist = cash
-                cash = 0
+                t2_dist = cash; cash = 0
             else:
-                t2_dist = t2_balance
-                cash -= t2_balance
+                t2_dist = t2_balance; cash -= t2_balance
             t2_balance -= t2_dist
         else:
             t2_dist = 0
             
-        lp_t2 = t2_dist * (1 - tier_2_gp_split)
-        gp_t2 = t2_dist * tier_2_gp_split
+        lp_t2 = t2_dist * (1 - tier_2_gp_split); gp_t2 = t2_dist * tier_2_gp_split
         
-        # TIER 3: Second Promote
+        # TIER 3
         t3_dist = cash
-        lp_t3 = t3_dist * (1 - tier_3_gp_split)
-        gp_t3 = t3_dist * tier_3_gp_split
+        lp_t3 = t3_dist * (1 - tier_3_gp_split); gp_t3 = t3_dist * tier_3_gp_split
         
         df.loc[year, 'LP_Cash_Flow'] = lp_t1 + lp_t2 + lp_t3
         df.loc[year, 'GP_Cash_Flow'] = gp_t1 + gp_t2 + gp_t3
@@ -109,7 +106,7 @@ def calculate_waterfall(df, total_equity):
     return df, lp_contribution_amt, gp_contribution_amt
 
 # --- 3. RUNNING THE LOGIC ---
-df_model, tot_equity = run_model()
+df_model, tot_equity, ann_interest = run_model()
 df_waterfall, lp_invest, gp_invest = calculate_waterfall(df_model, tot_equity)
 
 deal_irr = npf.irr(df_waterfall['Levered_CF'])
@@ -119,19 +116,49 @@ gp_irr = npf.irr(df_waterfall['GP_Cash_Flow'])
 lp_moic = df_waterfall['LP_Cash_Flow'][df_waterfall['LP_Cash_Flow'] > 0].sum() / lp_invest if lp_invest > 0 else 0
 gp_moic = df_waterfall['GP_Cash_Flow'][df_waterfall['GP_Cash_Flow'] > 0].sum() / gp_invest if gp_invest > 0 else 0
 
-# --- 4. UI: THE DASHBOARD (OUTPUTS) ---
-st.title("Real Estate Underwriting & Waterfall Tool")
+# DSCR Calculation
+year_1_dscr = year_1_noi / ann_interest if ann_interest > 0 else 0
+dscr_indicator = "🟢" if year_1_dscr >= 1.25 else "🔴"
 
-st.subheader("Return Metrics")
-col1, col2, col3 = st.columns(3)
-col1.metric("Project Levered IRR", f"{deal_irr:.2%}")
-col2.metric("LP IRR (Investor)", f"{lp_irr:.2%}", f"{lp_moic:.2f}x MoIC")
-col3.metric("GP IRR (Sponsor)", f"{gp_irr:.2%}", f"{gp_moic:.2f}x MoIC")
+# --- 4. UI: THE DASHBOARD (OUTPUTS) ---
+st.title("Real Estate Underwriting Platform")
+
+# Map Integration
+try:
+    geolocator = Nominatim(user_agent="re_underwriting_app")
+    location = geolocator.geocode(address)
+    if location:
+        map_data = pd.DataFrame({'lat': [location.latitude], 'lon': [location.longitude]})
+        st.map(map_data, zoom=15)
+except:
+    st.info("Enter a valid address in the sidebar to view the property map.")
+
+st.subheader("Return & Risk Metrics")
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Project IRR", f"{deal_irr:.2%}")
+col2.metric("LP IRR", f"{lp_irr:.2%}", f"{lp_moic:.2f}x MoIC")
+col3.metric("GP IRR", f"{gp_irr:.2%}", f"{gp_moic:.2f}x MoIC")
+col4.metric("Year 1 DSCR", f"{year_1_dscr:.2f}x", f"{dscr_indicator} Target: 1.25x")
 
 st.divider()
 
 st.subheader("Waterfall Cash Flows")
-st.dataframe(df_waterfall[['Levered_CF', 'LP_Cash_Flow', 'GP_Cash_Flow']].style.format("${:,.0f}"))
+# Format for viewing
+display_df = df_waterfall[['Levered_CF', 'LP_Cash_Flow', 'GP_Cash_Flow']].style.format("${:,.0f}")
+st.dataframe(display_df)
+
+# Download to CSV Functionality
+@st.cache_data
+def convert_df(df):
+    return df.to_csv(index=True).encode('utf-8')
+
+csv_data = convert_df(df_waterfall)
+st.download_button(
+    label="📥 Download Pro Forma (CSV)",
+    data=csv_data,
+    file_name='Deal_Underwriting_Export.csv',
+    mime='text/csv',
+)
 
 st.divider()
 
