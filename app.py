@@ -136,10 +136,44 @@ with tab1:
 
 with tab4:
     st.subheader("📈 Levered IRR Sensitivity Analysis")
+    st.write("Cross-tab of Purchase Price vs Exit Cap Rate")
     prices = [purchase_price * f for f in [0.9, 0.95, 1.0, 1.05, 1.1]]
     caps = [exit_cap_rate + offset for offset in [-0.01, -0.005, 0, 0.005, 0.01]]
     matrix_data = [[f"{math_engine.run_model_engine(assumptions, dynamic_gpr, p_price_override=p, e_cap_override=c)[0]:.2%}" if math_engine.run_model_engine(assumptions, dynamic_gpr, p_price_override=p, e_cap_override=c)[0] > -0.99 else "Loss" for c in caps] for p in prices]
     st.table(pd.DataFrame(matrix_data, index=[f"USD {p:,.0f}" for p in prices], columns=[f"{c:.2%}" for c in caps]))
+
+    st.divider()
+    
+    # --- NEW MONTE CARLO SECTION ---
+    st.subheader("🎲 Monte Carlo Risk Simulation")
+    st.write("Run 250 parallel universes of your deal by introducing historical volatility into your Exit Cap Rate, Permanent Interest Rate, and Rent Growth assumptions.")
+    
+    if st.button("Run Monte Carlo Simulation", type="primary"):
+        with st.spinner("Running 250 deal simulations..."):
+            import numpy as np
+            sim_results = math_engine.run_monte_carlo(assumptions, dynamic_gpr, iterations=250)
+            
+            if len(sim_results) > 0:
+                avg_irr = sum(sim_results) / len(sim_results)
+                success_rate = len([r for r in sim_results if r >= 0.15]) / len(sim_results)
+                loss_rate = len([r for r in sim_results if r <= 0.0]) / len(sim_results)
+                
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Average Expected IRR", f"{avg_irr:.2%}")
+                c2.metric("Probability of hitting 15% IRR", f"{success_rate:.0%}")
+                c3.metric("Probability of losing Equity", f"{loss_rate:.0%}")
+                
+                # Create the Bell Curve Histogram
+                hist_data = pd.DataFrame(sim_results, columns=['IRR'])
+                hist_data['IRR (%)'] = hist_data['IRR'] * 100
+                counts, bins = np.histogram(hist_data['IRR (%)'], bins=20)
+                bin_labels = [f"{b:.1f}%" for b in bins[:-1]]
+                chart_df = pd.DataFrame({'Frequency': counts}, index=bin_labels)
+                
+                st.write("**IRR Distribution Curve**")
+                st.bar_chart(chart_df)
+            else:
+                st.error("Simulation resulted in total losses across all scenarios. Lower purchase price.")
 
 with tab2:
     st.dataframe(df_wf.style.format("USD {:,.0f}"), height=600)
