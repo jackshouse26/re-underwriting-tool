@@ -1,9 +1,11 @@
 import streamlit as st
 import pandas as pd
+import importlib
 from geopy.geocoders import Nominatim
 
-# Import our custom modules
-import math_engine
+# Import our custom modules — reload forces Streamlit to pick up any
+# changes to math_engine.py rather than serving a stale cached module.
+import math_engine; importlib.reload(math_engine)
 import ai_agent
 import pdf_generator
 import live_data
