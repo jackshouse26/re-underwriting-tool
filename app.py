@@ -36,27 +36,59 @@ else:
 if "saved_deals" not in st.session_state: st.session_state.saved_deals = []
 if "memo_text" not in st.session_state: st.session_state.memo_text = ""
 
+# NEW: God Mode Memory (allows AI to overwrite defaults)
+if "om_address" not in st.session_state: st.session_state.om_address = "11 Wall Street, New York, NY"
+if "om_price" not in st.session_state: st.session_state.om_price = 5000000
+if "om_capex" not in st.session_state: st.session_state.om_capex = 1200000
+if "om_opex" not in st.session_state: st.session_state.om_opex = 150000
+if "om_cap" not in st.session_state: st.session_state.om_cap = 5.5
+
 API_KEY = st.secrets["GEMINI_API_KEY"] if "GEMINI_API_KEY" in st.secrets else None
 
 # --- SIDEBAR INPUTS ---
 st.sidebar.title("🏢 Deal Assumptions")
-address = st.sidebar.text_input("Property Address", "11 Wall Street, New York, NY")
+
+# NEW: God Mode Drop Zone
+st.sidebar.subheader("🤖 God Mode: Auto-Fill OM")
+om_file = st.sidebar.file_uploader("Upload Broker OM (PDF)", type="pdf")
+if om_file and st.sidebar.button("Extract Deal Data", type="primary"):
+    if API_KEY:
+        with st.spinner("Jack is reading the OM and underwriting the deal..."):
+            try:
+                extracted = ai_agent.extract_om_data(om_file, API_KEY)
+                # Overwrite the session state with AI findings
+                st.session_state.om_address = extracted.get("address", st.session_state.om_address)
+                st.session_state.om_price = int(extracted.get("purchase_price", st.session_state.om_price))
+                st.session_state.om_capex = int(extracted.get("capex_budget", st.session_state.om_capex))
+                st.session_state.om_opex = int(extracted.get("year_1_opex", st.session_state.om_opex))
+                st.session_state.om_cap = float(extracted.get("exit_cap_rate", st.session_state.om_cap))
+                st.sidebar.success("OM Extracted! Sliders Updated.")
+                st.rerun() # Force app to refresh with new slider positions!
+            except Exception as e:
+                st.sidebar.error("Could not cleanly parse the OM. Ensure it contains underwriting text.")
+    else:
+        st.sidebar.warning("Add GEMINI_API_KEY to secrets.")
+
+st.sidebar.divider()
+
+# Notice the 'value' parameters are now tied to our st.session_state memory!
+address = st.sidebar.text_input("Property Address", value=st.session_state.om_address)
 
 with st.sidebar.expander("🏗️ 1. Acquisition & CapEx", expanded=True):
-    purchase_price = st.number_input("Purchase Price ($)", value=5000000, step=100000)
-    capex_budget = st.number_input("Construction / CapEx ($)", value=1200000, step=50000)
+    purchase_price = st.number_input("Purchase Price ($)", value=st.session_state.om_price, step=100000)
+    capex_budget = st.number_input("Construction / CapEx ($)", value=st.session_state.om_capex, step=50000)
     const_months = st.slider("Construction Duration (Months)", 0, 24, 12)
     hold_period_yrs = st.slider("Total Hold Period (Years)", 2, 10, 5)
 
 with st.sidebar.expander("🏢 2. Operations & Exit", expanded=False):
     use_market_rents = st.checkbox("📈 Underwrite to Market Rents?", value=False)
     income_growth = st.slider("Annual Income Growth (%)", 1.0, 10.0, 3.0, 0.5) / 100
-    year_1_opex = st.number_input("Year 1 OpEx ($)", value=150000, step=5000)
+    year_1_opex = st.number_input("Year 1 OpEx ($)", value=st.session_state.om_opex, step=5000)
     expense_growth = st.slider("Annual Expense Growth (%)", 1.0, 10.0, 3.0, 0.5) / 100
     has_abatement = st.checkbox("Apply Tax Abatement?")
     abatement_savings = st.number_input("Annual Tax Savings ($)", value=50000, step=5000) if has_abatement else 0
     abatement_years = st.slider("Abatement Duration (Years)", 1, 10, 5) if has_abatement else 0
-    exit_cap_rate = st.sidebar.slider("Exit Cap Rate (%)", 4.0, 10.0, 5.5, 0.1) / 100
+    exit_cap_rate = st.sidebar.slider("Exit Cap Rate (%)", 4.0, 10.0, float(st.session_state.om_cap), 0.1) / 100
 
 # Fetch live rates before drawing the sliders!
 live_const, live_perm = live_data.get_live_rates()
