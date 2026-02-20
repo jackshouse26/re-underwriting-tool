@@ -21,6 +21,9 @@ def run_model_engine(assumptions, gpr_total, p_price_override=None, e_cap_overri
     refi_month = assumptions['refi_month']
     perm_ltv = assumptions['perm_ltv']
     perm_rate = assumptions['perm_rate']
+    closing_costs_pct = assumptions.get('closing_costs_pct', 0.015)
+    loan_orig_fee_pct = assumptions.get('loan_orig_fee_pct', 0.01)
+    exit_costs_pct    = assumptions.get('exit_costs_pct', 0.02)
 
     total_months = hold_period_yrs * 12
     df = pd.DataFrame(index=range(0, total_months + 1))
@@ -29,9 +32,11 @@ def run_model_engine(assumptions, gpr_total, p_price_override=None, e_cap_overri
         
     total_cost = p_price + capex_budget
     loan_max = total_cost * const_ltv
-    initial_equity = total_cost - loan_max
-    
-    df.loc[0, 'Unlevered_CF'] = -total_cost
+    acq_costs = p_price * closing_costs_pct
+    orig_fee  = loan_max * loan_orig_fee_pct
+    initial_equity = total_cost - loan_max + acq_costs + orig_fee
+
+    df.loc[0, 'Unlevered_CF'] = -(total_cost + acq_costs)
     df.loc[0, 'Levered_CF'] = -initial_equity
     
     current_bal = p_price * const_ltv
@@ -66,7 +71,7 @@ def run_model_engine(assumptions, gpr_total, p_price_override=None, e_cap_overri
             df.loc[m, 'Levered_CF'] = noi - ds
 
     exit_noi = ((gpr_total * ((1 + income_growth)**((total_months+1)/12))) - (year_1_opex * ((1 + expense_growth)**((total_months+1)/12))))
-    exit_val = (exit_noi / e_cap) * 0.98
+    exit_val = (exit_noi / e_cap) * (1 - exit_costs_pct)
     
     df.loc[total_months, 'Unlevered_CF'] += exit_val
     df.loc[total_months, 'Levered_CF'] += (exit_val - df.loc[total_months, 'Perm_Balance'])

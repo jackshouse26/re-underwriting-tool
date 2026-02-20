@@ -104,17 +104,22 @@ with st.sidebar.expander("🏦 3. Debt Financing", expanded=False):
     refi_month = st.slider("Refinance Month", const_months, hold_period_yrs * 12, const_months)
     perm_ltv = st.slider("Perm Loan-to-Value (%)", 0.0, 80.0, 65.0, 1.0) / 100
     perm_rate = st.slider("Perm Interest Rate (%)", 3.0, 12.0, live_perm_default, 0.1) / 100
+    st.divider()
+    closing_costs_pct = st.slider("Acquisition Closing Costs (%)", 0.0, 3.0, 1.5, 0.1) / 100
+    loan_orig_fee_pct = st.slider("Loan Origination Fee (%)", 0.0, 3.0, 1.0, 0.1) / 100
+    exit_costs_pct    = st.slider("Exit Transaction Costs (%)", 0.5, 4.0, 2.0, 0.1) / 100
 
 assumptions = {
     "purchase_price": purchase_price, "capex_budget": capex_budget, "const_months": const_months,
     "hold_period_yrs": hold_period_yrs, "income_growth": income_growth, "year_1_opex": year_1_opex,
     "expense_growth": expense_growth, "has_abatement": has_abatement, "abatement_savings": abatement_savings,
     "abatement_years": abatement_years, "exit_cap_rate": exit_cap_rate, "const_ltv": const_ltv,
-    "const_rate": const_rate, "refi_month": refi_month, "perm_ltv": perm_ltv, "perm_rate": perm_rate
+    "const_rate": const_rate, "refi_month": refi_month, "perm_ltv": perm_ltv, "perm_rate": perm_rate,
+    "closing_costs_pct": closing_costs_pct, "loan_orig_fee_pct": loan_orig_fee_pct, "exit_costs_pct": exit_costs_pct
 }
 
 # --- TABS ---
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "🗓️ Pro Forma", "🔑 Rent Roll", "📈 Sensitivity"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "🗓️ Pro Forma", "🔑 Rent Roll", "📈 Sensitivity", "📋 Scenarios"])
 
 with tab3:
     col_a, col_b = st.columns([1, 2])
@@ -149,7 +154,11 @@ _invested = _lev[_lev < 0].abs().sum()
 _returned = _lev[_lev > 0].sum()
 moic = _returned / _invested if _invested > 0 else 0
 
+year_1_noi_annual = st.session_state.active_gpr - year_1_opex
+going_in_cap = year_1_noi_annual / tot_cost if tot_cost > 0 else 0
+
 with tab1:
+    st.title("Wes's Secret Underwriting Tool")
     st.subheader("Key Deal Metrics")
     c1, c2, c3 = st.columns(3)
     c1.metric("Levered IRR",   f"{lev_irr:.2%}"   if lev_irr   > -1 else "Loss")
@@ -160,7 +169,37 @@ with tab1:
     c4.metric("Year 1 DSCR", f"{dscr:.2f}x", delta="Target: 1.25x")
     c5.metric("Breakeven Occ.", f"{breakeven_occ:.1%}", delta="Risk Metric", delta_color="inverse")
     c6.metric("Equity Required", f"USD {init_eq:,.0f}")
-    
+
+    st.divider()
+    st.subheader("Deal Health Check")
+    h1, h2, h3, h4, h5 = st.columns(5)
+
+    if lev_irr >= 0.15:
+        h1.success(f"✅ **IRR**\n\n{lev_irr:.2%} ≥ 15%")
+    else:
+        h1.error(f"❌ **IRR**\n\n{lev_irr:.2%} < 15% hurdle")
+
+    if dscr >= 1.25:
+        h2.success(f"✅ **DSCR**\n\n{dscr:.2f}x ≥ 1.25x")
+    else:
+        h2.error(f"❌ **DSCR**\n\n{dscr:.2f}x < 1.25x")
+
+    if exit_cap_rate >= going_in_cap:
+        h3.success(f"✅ **Cap Rate**\n\nNo compression assumed")
+    else:
+        h3.warning(f"⚠️ **Cap Compression**\n\nExit {exit_cap_rate:.2%} < In {going_in_cap:.2%}")
+
+    max_ltv = max(const_ltv, perm_ltv)
+    if max_ltv <= 0.75:
+        h4.success(f"✅ **Max LTV**\n\n{max_ltv:.0%} ≤ 75%")
+    else:
+        h4.warning(f"⚠️ **Max LTV**\n\n{max_ltv:.0%} > 75%")
+
+    if breakeven_occ <= 0.85:
+        h5.success(f"✅ **Breakeven Occ.**\n\n{breakeven_occ:.1%}")
+    else:
+        h5.warning(f"⚠️ **Breakeven Occ.**\n\n{breakeven_occ:.1%} > 85%")
+
     st.divider()
     col_chart, col_map = st.columns([2, 1])
     with col_chart:
@@ -224,3 +263,45 @@ with tab4:
 
 with tab2:
     st.dataframe(df_wf.style.format("USD {:,.0f}"), height=600)
+
+with tab5:
+    st.subheader("Bear / Base / Bull Scenarios")
+    st.caption("Fixed adjustments applied on top of your base assumptions. Tweak the sidebar to shift all three scenarios together.")
+
+    scenario_defs = {
+        "🐻 Bear": {"price_delta":  0.05, "cap_delta":  0.0075, "growth_delta": -0.01, "rate_delta":  0.0075},
+        "📊 Base": {"price_delta":  0.0,  "cap_delta":  0.0,    "growth_delta":  0.0,  "rate_delta":  0.0},
+        "🐂 Bull": {"price_delta": -0.05, "cap_delta": -0.005,  "growth_delta":  0.01, "rate_delta": -0.005},
+    }
+
+    assumption_rows = {
+        "Purchase Price": [f"USD {purchase_price * (1 + d['price_delta']):,.0f}" for d in scenario_defs.values()],
+        "Exit Cap Rate":  [f"{exit_cap_rate  + d['cap_delta']:.2%}"              for d in scenario_defs.values()],
+        "Income Growth":  [f"{income_growth  + d['growth_delta']:.1%}"           for d in scenario_defs.values()],
+        "Perm Rate":      [f"{perm_rate      + d['rate_delta']:.2%}"             for d in scenario_defs.values()],
+    }
+    st.caption("**Scenario Assumptions**")
+    st.table(pd.DataFrame(assumption_rows, index=list(scenario_defs.keys())).T)
+
+    st.divider()
+
+    results = {}
+    for name, deltas in scenario_defs.items():
+        s_assum = assumptions.copy()
+        s_assum['purchase_price'] = purchase_price * (1 + deltas['price_delta'])
+        s_assum['exit_cap_rate']  = exit_cap_rate  + deltas['cap_delta']
+        s_assum['income_growth']  = income_growth  + deltas['growth_delta']
+        s_assum['perm_rate']      = perm_rate      + deltas['rate_delta']
+        s_irr, s_dscr, s_df, s_eq, _, s_unlev = math_engine.run_model_engine(s_assum, st.session_state.active_gpr)
+        s_cf = s_df['Levered_CF']
+        s_moic = s_cf[s_cf > 0].sum() / s_cf[s_cf < 0].abs().sum() if s_cf[s_cf < 0].abs().sum() > 0 else 0
+        results[name] = {
+            "Levered IRR":    f"{s_irr:.2%}"   if s_irr   > -1 else "Loss",
+            "Unlevered IRR":  f"{s_unlev:.2%}" if s_unlev > -1 else "Loss",
+            "MOIC":           f"{s_moic:.2f}x",
+            "DSCR":           f"{s_dscr:.2f}x",
+            "Equity Required": f"USD {s_eq:,.0f}",
+        }
+
+    st.caption("**Scenario Results**")
+    st.table(pd.DataFrame(results))
