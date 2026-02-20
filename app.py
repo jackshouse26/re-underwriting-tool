@@ -32,13 +32,22 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- SESSION STATE INITIALIZATION ---
+# --- SESSION STATE INITIALIZATION & BUG FIX ---
 if "rent_roll_data" not in st.session_state:
     st.session_state.rent_roll_data = pd.DataFrame([
         {"Unit Type": "1 Bed / 1 Bath", "Count": 10, "Sq Ft": 750, "Current Rent ($)": 1200, "Market Rent ($)": 1400},
         {"Unit Type": "2 Bed / 2 Bath", "Count": 5, "Sq Ft": 1000, "Current Rent ($)": 1600, "Market Rent ($)": 1850},
         {"Unit Type": "Studio", "Count": 2, "Sq Ft": 500, "Current Rent ($)": 900, "Market Rent ($)": 1050}
     ])
+else:
+    # BUG FIX: Automatically upgrade old session states so we don't get a KeyError!
+    if "Monthly Rent ($)" in st.session_state.rent_roll_data.columns:
+        st.session_state.rent_roll_data.rename(columns={"Monthly Rent ($)": "Current Rent ($)"}, inplace=True)
+        if "Market Rent ($)" not in st.session_state.rent_roll_data.columns:
+            st.session_state.rent_roll_data["Market Rent ($)"] = st.session_state.rent_roll_data["Current Rent ($)"] * 1.15
+
+if "saved_deals" not in st.session_state:
+    st.session_state.saved_deals = []
 
 # --- 1. UI: THE SIDEBAR (INPUTS) ---
 st.sidebar.title("🏢 Deal Assumptions")
@@ -84,7 +93,7 @@ with st.sidebar.expander("🌊 4. Equity Waterfall", expanded=False):
     tier_2_gp_split = st.slider("Tier 2 GP Promote (%)", 10, 50, 20, 5) / 100
     tier_3_gp_split = st.slider("Tier 3 GP Promote (%)", 20, 60, 40, 5) / 100
 
-# --- 2. THE REUSABLE MATH ENGINE (UNCHANGED) ---
+# --- 2. THE REUSABLE MATH ENGINE ---
 def run_model_engine(p_price, e_cap, gpr_total):
     total_months = hold_period_yrs * 12
     df = pd.DataFrame(index=range(0, total_months + 1))
@@ -95,7 +104,6 @@ def run_model_engine(p_price, e_cap, gpr_total):
     loan_max = total_cost * const_ltv
     initial_equity = total_cost - loan_max
     
-    # Month 0: Initial Investment
     df.loc[0, 'Unlevered_CF'] = -total_cost
     df.loc[0, 'Levered_CF'] = -initial_equity
     
@@ -158,7 +166,6 @@ with tab3:
                     reader = PyPDF2.PdfReader(uploaded_file); pdf_text = "\n".join([p.extract_text() for p in reader.pages])
                     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
                     model = genai.GenerativeModel('gemini-2.5-flash')
-                    # Updated Prompt for both Current and Market rents
                     prompt = f"Extract rent roll to JSON: Unit Type, Count, Sq Ft, Current Rent ($), Market Rent ($). Text: {pdf_text}"
                     response = model.generate_content(prompt)
                     raw_json = response.text.replace("```json", "").replace("```", "").strip()
@@ -173,7 +180,6 @@ with tab3:
 # Run deal math for current inputs
 lev_irr, dscr, df_wf, init_eq, tot_cost = run_model_engine(purchase_price, exit_cap_rate, dynamic_gpr)
 
-# Breakeven Occupancy Calculation (Phase 2 Add)
 max_debt_service = df_wf['Debt_Service'].max() * 12
 breakeven_occ = (max_debt_service + year_1_opex) / dynamic_gpr if dynamic_gpr > 0 else 0
 
@@ -182,7 +188,6 @@ with tab1:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Levered IRR", f"{lev_irr:.2%}" if lev_irr > -1 else "Loss")
     c2.metric("Year 1 DSCR", f"{dscr:.2f}x", delta="Target: 1.25x")
-    # Added Breakeven Metric
     c3.metric("Breakeven Occ.", f"{breakeven_occ:.1%}", delta="Risk Metric", delta_color="inverse")
     c4.metric("Equity Required", f"USD {init_eq:,.0f}")
     
@@ -192,11 +197,21 @@ with tab1:
         st.write("**Cash Flow Timeline**")
         st.bar_chart(df_wf['Levered_CF'])
     with col_map:
+        st.write("**Property Location & Context**")
         try:
             geolocator = Nominatim(user_agent="re_pro")
             loc = geolocator.geocode(address)
             if loc: st.map(pd.DataFrame({'lat':[loc.latitude], 'lon':[loc.longitude]}), zoom=14)
         except: st.info("Map unavailable.")
+        
+        # --- PHASE 3: NEIGHBORHOOD CONTEXT ---
+        if st.button("🏙️ AI Neighborhood Context"):
+             if "GEMINI_API_KEY" in st.secrets:
+                 with st.spinner("Researching local market drivers..."):
+                     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                     model = genai.GenerativeModel('gemini-2.5-flash')
+                     context_prompt = f"Act as a real estate acquisitions analyst. Provide a brief 2-paragraph neighborhood analysis for {address}. Highlight potential economic drivers, transit access, and typical zoning/development trends in this specific submarket."
+                     st.info(model.generate_content(context_prompt).text)
 
     st.divider()
     if st.button("✨ Generate Investment Memo", type="primary"):
