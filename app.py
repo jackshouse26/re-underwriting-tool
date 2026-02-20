@@ -33,8 +33,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- 1. UI: THE SIDEBAR (INPUTS) ---
-st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/1/14/Building_icon.svg/1024px-Building_icon.svg.png", width=50)
-st.sidebar.title("Deal Assumptions")
+st.sidebar.title("🏢 Deal Assumptions")
 address = st.sidebar.text_input("Property Address", "11 Wall Street, New York, NY")
 
 with st.sidebar.expander("🏗️ 1. Acquisition & CapEx", expanded=True):
@@ -283,11 +282,12 @@ with tab1:
                 **1. Executive Summary & Capital Stack:** Context, location, and capitalization.
                 **2. Business Plan & Financing:** Transition from construction to permanent financing, plus abatement impact.
                 **3. Return Profile & Recommendation:** LP vs GP alignment, leverage impact, and Go/No-Go recommendation.
+                
+                CRITICAL INSTRUCTION: Do NOT use the "$" symbol anywhere in your response. Always use "USD" instead.
                 """
                 
                 response = model.generate_content(prompt)
-                safe_text = response.text.replace('$', '\$')
-                st.info(safe_text)
+                st.info(response.text)
     else:
         st.warning("⚠️ Add GEMINI_API_KEY to Streamlit Secrets to use AI.")
 
