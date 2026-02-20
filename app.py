@@ -6,6 +6,7 @@ from geopy.geocoders import Nominatim
 import math_engine
 import ai_agent
 import pdf_generator
+import live_data 
 
 st.set_page_config(page_title="Real Estate Underwriting Pro", page_icon="🏢", layout="wide")
 
@@ -57,12 +58,26 @@ with st.sidebar.expander("🏢 2. Operations & Exit", expanded=False):
     abatement_years = st.slider("Abatement Duration (Years)", 1, 10, 5) if has_abatement else 0
     exit_cap_rate = st.sidebar.slider("Exit Cap Rate (%)", 4.0, 10.0, 5.5, 0.1) / 100
 
+# Fetch live rates before drawing the sliders!
+live_const, live_perm = live_data.get_live_rates()
+
 with st.sidebar.expander("🏦 3. Debt Financing", expanded=False):
+    st.write("**Construction Loan**")
     const_ltv = st.slider("Const. Loan-to-Cost (%)", 0.0, 85.0, 65.0, 1.0) / 100
-    const_rate = st.slider("Const. Interest Rate (%)", 4.0, 12.0, 8.0, 0.1) / 100
+    # Notice the default value is now `live_const`
+    const_rate = st.slider("Const. Interest Rate (%)", 4.0, 15.0, live_const, 0.1) / 100
+    
+    st.divider()
+    has_mezz = st.checkbox("Add Mezzanine Debt?")
+    mezz_ltc = st.slider("Mezz Loan-to-Cost (%)", 0.0, 20.0, 10.0, 1.0) / 100 if has_mezz else 0.0
+    mezz_rate = st.slider("Mezz Interest Rate (%)", 5.0, 15.0, 10.0, 0.1) / 100 if has_mezz else 0.0
+    
+    st.divider()
+    st.write("**Permanent Loan (Refi)**")
     refi_month = st.slider("Refinance Month", const_months, hold_period_yrs * 12, const_months)
     perm_ltv = st.slider("Perm Loan-to-Value (%)", 0.0, 80.0, 65.0, 1.0) / 100
-    perm_rate = st.slider("Perm Interest Rate (%)", 3.0, 10.0, 5.5, 0.1) / 100
+    # Notice the default value is now `live_perm`
+    perm_rate = st.slider("Perm Interest Rate (%)", 3.0, 12.0, live_perm, 0.1) / 100
 
 # Pack all inputs into a dictionary for our new module
 assumptions = {
