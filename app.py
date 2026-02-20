@@ -1,10 +1,15 @@
 import streamlit as st
 import pandas as pd
 import numpy_financial as npf
+from geopy.geocoders import Nominatim
+import google.generativeai as genai
 
-st.set_page_config(layout="wide") # Makes the dashboard wider for the big tables
+st.set_page_config(layout="wide")
 
 # --- 1. UI: THE SIDEBAR (INPUTS) ---
+st.sidebar.header("Property Details")
+address = st.sidebar.text_input("Property Address", "11 Wall Street, New York, NY")
+
 st.sidebar.header("1. Deal Assumptions")
 purchase_price = st.sidebar.number_input("Purchase Price ($)", value=5000000, step=100000)
 capex_budget = st.sidebar.number_input("Construction / CapEx ($)", value=1200000, step=50000)
@@ -49,33 +54,27 @@ def run_monthly_model():
     total_months = hold_period_yrs * 12
     df = pd.DataFrame(index=range(0, total_months + 1))
     
-    # 0. Initialize columns
     cols = ['CapEx', 'Unlevered_CF', 'Const_Draw', 'Const_Balance', 'Const_Interest', 
             'Perm_Balance', 'Perm_Interest', 'Levered_CF']
     for c in cols: df[c] = 0.0
         
-    # 1. Day 1 Acquisition
     total_cost = purchase_price + capex_budget
     const_loan_max = total_cost * const_ltv
     initial_equity = total_cost - const_loan_max
     
-    # Check: Sources vs Uses
     total_sources = const_loan_max + initial_equity
     sources_uses_match = abs(total_sources - total_cost) < 1
     
     df.loc[0, 'Unlevered_CF'] = -purchase_price
     df.loc[0, 'Levered_CF'] = -initial_equity
     
-    # 2. Construction Draws & CapEx
     monthly_capex = capex_budget / const_months if const_months > 0 else 0
     monthly_const_draw = (const_loan_max - (purchase_price * const_ltv)) / const_months if const_months > 0 else 0
     
     current_const_balance = purchase_price * const_ltv
     df.loc[0, 'Const_Balance'] = current_const_balance
     
-    # 3. Monthly Loop (Operations & Debt)
     for m in range(1, total_months + 1):
-        # Operations
         current_gpr = year_1_gpr * ((1 + income_growth) ** (m/12))
         current_opex = year_1_opex * ((1 + expense_growth) ** (m/12))
         
@@ -84,14 +83,11 @@ def run_monthly_model():
             
         noi = (current_gpr - current_opex) / 12
         
-        # CapEx Draw
         capex = monthly_capex if m <= const_months else 0
         df.loc[m, 'CapEx'] = -capex
         df.loc[m, 'Unlevered_CF'] = noi - capex
         
-        # Debt Logic
         if m <= refi_month:
-            # Construction Phase
             interest = current_const_balance * (const_rate / 12)
             draw = monthly_const_draw if m <= const_months else 0
             current_const_balance += draw
@@ -102,13 +98,11 @@ def run_monthly_model():
             df.loc[m, 'Levered_CF'] = noi - capex + draw - interest
         
         elif m == refi_month + 1:
-            # The Refinance Event!
             forward_12m_noi = sum([ (year_1_gpr * ((1 + income_growth) ** ((m+i)/12)) - 
                                    (year_1_opex * ((1 + expense_growth) ** ((m+i)/12)))) / 12 for i in range(12)])
             property_value = forward_12m_noi / exit_cap_rate
             perm_loan_amount = property_value * perm_ltv
             
-            # Payoff construction loan, keep leftover cash
             net_refi_proceeds = perm_loan_amount - current_const_balance
             
             df.loc[m, 'Perm_Balance'] = perm_loan_amount
@@ -116,21 +110,19 @@ def run_monthly_model():
             df.loc[m, 'Perm_Interest'] = -interest
             
             df.loc[m, 'Levered_CF'] = noi + net_refi_proceeds - interest
-            current_const_balance = 0 # Const loan is gone
+            current_const_balance = 0 
         else:
-            # Stabilized Perm Phase
             perm_loan_amount = df.loc[m-1, 'Perm_Balance']
             interest = perm_loan_amount * (perm_rate / 12)
             df.loc[m, 'Perm_Balance'] = perm_loan_amount
             df.loc[m, 'Perm_Interest'] = -interest
             df.loc[m, 'Levered_CF'] = noi - interest
             
-    # 4. Exit Sale
     exit_m = total_months
     forward_12m_noi = sum([ (year_1_gpr * ((1 + income_growth) ** ((exit_m+i)/12)) - 
                            (year_1_opex * ((1 + expense_growth) ** ((exit_m+i)/12)))) / 12 for i in range(12)])
     gross_sales_price = forward_12m_noi / exit_cap_rate
-    net_proceeds = gross_sales_price * 0.98 # 2% broker fee
+    net_proceeds = gross_sales_price * 0.98 
     
     df.loc[exit_m, 'Unlevered_CF'] += net_proceeds
     df.loc[exit_m, 'Levered_CF'] += (net_proceeds - df.loc[exit_m, 'Perm_Balance'])
@@ -151,7 +143,6 @@ def run_monthly_waterfall(df, total_equity):
     t1_bal = total_equity
     t2_bal = total_equity
     
-    # Convert annual hurdles to monthly compounding rates
     m_hurdle_1 = (1 + tier_1_hurdle)**(1/12) - 1
     m_hurdle_2 = (1 + tier_2_hurdle)**(1/12) - 1
 
@@ -191,17 +182,14 @@ def run_monthly_waterfall(df, total_equity):
 # --- 4. EXECUTION & UI DASHBOARD ---
 st.title("Institutional Real Estate Model (Monthly)")
 
-# Run Math
 df_model, initial_equity, total_uses, total_sources, is_balanced = run_monthly_model()
 df_wf, lp_invest, gp_invest = run_monthly_waterfall(df_model, initial_equity)
 
-# Data Sanity Check Alert
 if is_balanced:
     st.success(f"✅ Sources & Uses Balanced! Total Capital: ${total_uses:,.0f}")
 else:
     st.error(f"❌ Warning: Sources (${total_sources:,.0f}) do not match Uses (${total_uses:,.0f}).")
 
-# Calculate IRRs (Convert Monthly IRR to Annualized IRR)
 try:
     unlev_irr = (1 + npf.irr(df_wf['Unlevered_CF']))**12 - 1
     lev_irr = (1 + npf.irr(df_wf['Levered_CF']))**12 - 1
@@ -210,14 +198,21 @@ try:
 except:
     unlev_irr, lev_irr, lp_irr, gp_irr = 0, 0, 0, 0
 
-# Calculate MoIC
 unlev_moic = df_wf['Unlevered_CF'][df_wf['Unlevered_CF'] > 0].sum() / total_uses
 lev_moic = df_wf['Levered_CF'][df_wf['Levered_CF'] > 0].sum() / initial_equity
 lp_moic = df_wf['LP_Cash_Flow'][df_wf['LP_Cash_Flow'] > 0].sum() / lp_invest if lp_invest > 0 else 0
 gp_moic = df_wf['GP_Cash_Flow'][df_wf['GP_Cash_Flow'] > 0].sum() / gp_invest if gp_invest > 0 else 0
 
+try:
+    geolocator = Nominatim(user_agent="re_underwriting_app")
+    location = geolocator.geocode(address)
+    if location:
+        map_data = pd.DataFrame({'lat': [location.latitude], 'lon': [location.longitude]})
+        st.map(map_data, zoom=15)
+except:
+    st.info("Enter a valid address in the sidebar to view the property map.")
+
 st.subheader("Return Matrix")
-# The Breakout Grid your friend asked for
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("1. Unlevered Deal", f"{unlev_irr:.2%}", f"{unlev_moic:.2f}x MoIC", delta_color="off")
 col2.metric("2. Levered Deal", f"{lev_irr:.2%}", f"{lev_moic:.2f}x MoIC", delta_color="off")
@@ -226,5 +221,57 @@ col4.metric("4. GP Returns", f"{gp_irr:.2%}", f"{gp_moic:.2f}x MoIC", delta_colo
 
 st.divider()
 
+# --- 5. AI INTEGRATION: GEMINI INVESTMENT MEMO ---
+st.subheader("Investment Memo")
+
+if "GEMINI_API_KEY" in st.secrets:
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    
+    if st.button("Generate Investment Memo"):
+        with st.spinner("Jack is analyzing your deal..."):
+            model = genai.GenerativeModel('gemini-2.5-flash')
+            
+            abatement_text = f"The deal includes a tax abatement saving ${abatement_savings:,.0f}/year for {abatement_years} years." if has_abatement else "No tax abatements are modeled."
+            
+            prompt = f"""
+            Act as a Principal at a Private Equity Real Estate firm. Write a highly professional, 3-paragraph Investment Committee (IC) Memo for a property located at {address}.
+            
+            Here is the institutional underwriting data:
+            - Purchase Price: ${purchase_price:,.0f} | CapEx/Construction Budget: ${capex_budget:,.0f}
+            - Total Capitalization (Sources): ${total_sources:,.0f}
+            - Construction Loan: {const_ltv*100}% LTC at {const_rate*100}% interest.
+            - Permanent Refinance: Refinancing in month {refi_month} at {perm_ltv*100}% LTV and {perm_rate*100}% interest.
+            - {abatement_text}
+            
+            Returns Profile ({hold_period_yrs}-Year Hold):
+            - Deal Level Levered IRR: {lev_irr:.2%} ({lev_moic:.2f}x MoIC)
+            - LP (Investor) IRR: {lp_irr:.2%} ({lp_moic:.2f}x MoIC)
+            - GP (Sponsor) IRR: {gp_irr:.2%} ({gp_moic:.2f}x MoIC)
+            
+            Format the memo exactly like this:
+            **1. Executive Summary & Capital Stack:** Provide an executive framing. Set the stage by identifying the opportunity at the location and detailing the total capitalization. 
+            **2. Business Plan & Financing:** Explain the transition from the construction/renovation draw phase into stabilized permanent financing. Explicitly mention the tax abatement impact if one exists. 
+            **3. Return Profile & Recommendation:** Discuss the LP vs. GP alignment based on the waterfall returns, highlight the power of the leverage used, and give a definitive "Go / No-Go" recommendation for the committee.
+            """
+            
+            response = model.generate_content(prompt)
+            st.write(response.text)
+else:
+    st.warning("⚠️ Please add your GEMINI_API_KEY to the Streamlit Secrets dashboard to use this feature.")
+
+st.divider()
+
 st.subheader("Monthly Cash Flow Timeline")
 st.dataframe(df_wf.style.format("${:,.0f}"))
+
+@st.cache_data
+def convert_df(df):
+    return df.to_csv(index=True).encode('utf-8')
+
+csv_data = convert_df(df_wf)
+st.download_button(
+    label="📥 Download Pro Forma (CSV)",
+    data=csv_data,
+    file_name='Deal_Underwriting_Export.csv',
+    mime='text/csv',
+)
