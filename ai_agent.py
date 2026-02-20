@@ -26,3 +26,32 @@ def get_neighborhood_context(address, api_key):
     model = genai.GenerativeModel('gemini-2.5-flash')
     context_prompt = f"Act as a real estate acquisitions analyst. Provide a brief 2-paragraph neighborhood analysis for {address}. Highlight potential economic drivers, transit access, and typical zoning/development trends in this specific submarket."
     return model.generate_content(context_prompt).text
+
+def extract_om_data(uploaded_file, api_key):
+    reader = PyPDF2.PdfReader(uploaded_file)
+    # Extract text from every page of the OM
+    pdf_text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
+    
+    genai.configure(api_key=api_key)
+    # Gemini 2.5 Flash has a massive context window, easily handling 60+ page PDFs
+    model = genai.GenerativeModel('gemini-2.5-flash')
+    
+    prompt = f"""
+    Act as an elite Real Estate Private Equity Acquisitions Analyst. 
+    Read this Offering Memorandum (OM) and extract the key underwriting assumptions.
+    Return EXACTLY a raw JSON object with these exact keys. If a value isn't explicitly stated, make your best educated guess based on the market or document context. Do not use commas in numbers.
+    {{
+        "address": "Property Address, City, ST",
+        "purchase_price": 5000000, 
+        "capex_budget": 1200000,
+        "year_1_opex": 150000,
+        "exit_cap_rate": 5.5
+    }}
+    Do not include markdown formatting like ```json. Just return the raw JSON.
+    
+    OM Text:
+    {pdf_text}
+    """
+    response = model.generate_content(prompt)
+    raw_json = response.text.replace("```json", "").replace("```", "").strip()
+    return json.loads(raw_json)
