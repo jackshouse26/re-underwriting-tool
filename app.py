@@ -61,13 +61,31 @@ if om_file and st.sidebar.button("Extract Deal Data", type="primary"):
         with st.spinner("Jack is reading the OM and underwriting the deal..."):
             try:
                 extracted = ai_agent.extract_om_data(om_file, API_KEY)
+                raw_price = extracted.get("purchase_price", st.session_state.om_price)
+                raw_cap   = float(extracted.get("exit_cap_rate", st.session_state.om_cap))
+                raw_capex = extracted.get("capex_budget", st.session_state.om_capex)
+                raw_opex  = extracted.get("year_1_opex", st.session_state.om_opex)
+
+                # Sanity-check extracted values before populating sliders
+                flags = []
+                if not (500_000 <= int(raw_price) <= 500_000_000):
+                    flags.append(f"Purchase price ${int(raw_price):,} is unusual (expected $500K–$500M)")
+                if not (3.0 <= raw_cap <= 12.0):
+                    flags.append(f"Cap rate {raw_cap:.2f}% is unusual (expected 3–12%)")
+                if int(raw_capex) <= 0:
+                    flags.append(f"CapEx ${int(raw_capex):,} is zero or negative — may be missing from OM")
+
                 st.session_state.om_address = extracted.get("address", st.session_state.om_address)
-                st.session_state.om_price = int(extracted.get("purchase_price", st.session_state.om_price))
-                st.session_state.om_capex = int(extracted.get("capex_budget", st.session_state.om_capex))
-                st.session_state.om_opex = int(extracted.get("year_1_opex", st.session_state.om_opex))
-                st.session_state.om_cap = float(extracted.get("exit_cap_rate", st.session_state.om_cap))
-                st.sidebar.success("OM Extracted! Sliders Updated.")
-                st.rerun() 
+                st.session_state.om_price = int(raw_price)
+                st.session_state.om_capex = int(raw_capex)
+                st.session_state.om_opex  = int(raw_opex)
+                st.session_state.om_cap   = raw_cap
+
+                if flags:
+                    st.sidebar.warning("⚠️ **Review before proceeding:**\n" + "\n".join(f"• {f}" for f in flags))
+                else:
+                    st.sidebar.success("OM Extracted! Sliders Updated.")
+                st.rerun()
             except Exception as e:
                 st.sidebar.error("Could not cleanly parse the OM. Ensure it contains underwriting text.")
     else:
@@ -157,6 +175,41 @@ moic = _returned / _invested if _invested > 0 else 0
 year_1_noi_annual = st.session_state.active_gpr - year_1_opex
 going_in_cap = year_1_noi_annual / tot_cost if tot_cost > 0 else 0
 
+# ── Pre-compute sensitivity matrix (used in tab4 and PDF) ────────────────────
+sens_prices = [purchase_price * f for f in [0.9, 0.95, 1.0, 1.05, 1.1]]
+sens_caps   = [exit_cap_rate + d for d in [-0.01, -0.005, 0.0, 0.005, 0.01]]
+sens_matrix = []
+for _p in sens_prices:
+    _row = []
+    for _c in sens_caps:
+        _r = math_engine.run_model_engine(assumptions, st.session_state.active_gpr, p_price_override=_p, e_cap_override=_c)[0]
+        _row.append(f"{_r:.2%}" if _r > -0.99 else "Loss")
+    sens_matrix.append(_row)
+
+# ── Pre-compute Bear/Base/Bull with plain keys for PDF ───────────────────────
+_pdf_scen_defs = {
+    "Bear": {"price_delta":  0.05, "cap_delta":  0.0075, "growth_delta": -0.01, "rate_delta":  0.0075},
+    "Base": {"price_delta":  0.0,  "cap_delta":  0.0,    "growth_delta":  0.0,  "rate_delta":  0.0},
+    "Bull": {"price_delta": -0.05, "cap_delta": -0.005,  "growth_delta":  0.01, "rate_delta": -0.005},
+}
+pdf_scenario_results = {}
+for _sname, _d in _pdf_scen_defs.items():
+    _a = assumptions.copy()
+    _a['purchase_price'] = purchase_price * (1 + _d['price_delta'])
+    _a['exit_cap_rate']  = exit_cap_rate  + _d['cap_delta']
+    _a['income_growth']  = income_growth  + _d['growth_delta']
+    _a['perm_rate']      = perm_rate      + _d['rate_delta']
+    _si, _sd, _sdf, _seq, _, _su = math_engine.run_model_engine(_a, st.session_state.active_gpr)
+    _scf = _sdf['Levered_CF']
+    _sm  = _scf[_scf > 0].sum() / _scf[_scf < 0].abs().sum() if _scf[_scf < 0].abs().sum() > 0 else 0
+    pdf_scenario_results[_sname] = {
+        "Levered IRR":   f"{_si:.2%}"  if _si  > -1 else "Loss",
+        "Unlevered IRR": f"{_su:.2%}"  if _su  > -1 else "Loss",
+        "MOIC":          f"{_sm:.2f}x",
+        "DSCR":          f"{_sd:.2f}x",
+        "Equity Req'd":  f"${_seq:,.0f}",
+    }
+
 with tab1:
     st.title("Wes's Secret Underwriting Tool")
     st.subheader("Key Deal Metrics")
@@ -225,15 +278,20 @@ with tab1:
     if st.session_state.memo_text:
         st.info(st.session_state.memo_text)
         with col_pdf:
-            pdf_bytes = pdf_generator.create_pdf_report(address, purchase_price, init_eq, lev_irr, dscr, breakeven_occ, st.session_state.memo_text)
+            pdf_bytes = pdf_generator.create_pdf_report(
+                address, purchase_price, init_eq, lev_irr, dscr, breakeven_occ,
+                st.session_state.memo_text,
+                unlev_irr=unlev_irr, moic=moic, total_cost=tot_cost, const_ltv=const_ltv,
+                scenario_results=pdf_scenario_results,
+                sensitivity_data={"prices": sens_prices, "caps": sens_caps, "matrix": sens_matrix},
+            )
             st.download_button("📥 Download PDF", data=pdf_bytes, file_name=f"IC_Memo_{address.replace(' ', '_')}.pdf", mime="application/pdf", type="primary")
 
 with tab4:
     st.subheader("📈 Levered IRR Sensitivity Analysis")
-    prices = [purchase_price * f for f in [0.9, 0.95, 1.0, 1.05, 1.1]]
-    caps = [exit_cap_rate + offset for offset in [-0.01, -0.005, 0, 0.005, 0.01]]
-    matrix_data = [[f"{math_engine.run_model_engine(assumptions, st.session_state.active_gpr, p_price_override=p, e_cap_override=c)[0]:.2%}" if math_engine.run_model_engine(assumptions, st.session_state.active_gpr, p_price_override=p, e_cap_override=c)[0] > -0.99 else "Loss" for c in caps] for p in prices]
-    st.table(pd.DataFrame(matrix_data, index=[f"USD {p:,.0f}" for p in prices], columns=[f"{c:.2%}" for c in caps]))
+    st.table(pd.DataFrame(sens_matrix,
+                          index=[f"USD {p:,.0f}" for p in sens_prices],
+                          columns=[f"{c:.2%}" for c in sens_caps]))
 
     st.divider()
     st.subheader("🎲 Monte Carlo Risk Simulation")
