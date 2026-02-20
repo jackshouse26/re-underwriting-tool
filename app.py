@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy_financial as npf
 from geopy.geocoders import Nominatim
+import google.generativeai as genai
 
 # --- 1. UI: THE SIDEBAR (INPUTS) ---
 st.sidebar.header("Property Details")
@@ -70,8 +71,7 @@ def calculate_waterfall(df, total_equity):
 
     for year in range(1, len(df)):
         cash = df.loc[year, 'Levered_CF']
-        if cash <= 0:
-            continue
+        if cash <= 0: continue
             
         # TIER 1
         t1_balance = t1_balance * (1 + tier_1_hurdle)
@@ -116,14 +116,12 @@ gp_irr = npf.irr(df_waterfall['GP_Cash_Flow'])
 lp_moic = df_waterfall['LP_Cash_Flow'][df_waterfall['LP_Cash_Flow'] > 0].sum() / lp_invest if lp_invest > 0 else 0
 gp_moic = df_waterfall['GP_Cash_Flow'][df_waterfall['GP_Cash_Flow'] > 0].sum() / gp_invest if gp_invest > 0 else 0
 
-# DSCR Calculation
 year_1_dscr = year_1_noi / ann_interest if ann_interest > 0 else 0
 dscr_indicator = "🟢" if year_1_dscr >= 1.25 else "🔴"
 
 # --- 4. UI: THE DASHBOARD (OUTPUTS) ---
 st.title("Real Estate Underwriting Platform")
 
-# Map Integration
 try:
     geolocator = Nominatim(user_agent="re_underwriting_app")
     location = geolocator.geocode(address)
@@ -142,12 +140,45 @@ col4.metric("Year 1 DSCR", f"{year_1_dscr:.2f}x", f"{dscr_indicator} Target: 1.2
 
 st.divider()
 
+# --- 5. AI INTEGRATION: GEMINI INVESTMENT MEMO ---
+st.subheader("✨ AI Investment Memo")
+
+# Check if the API key is safely stored in Streamlit secrets
+if "GEMINI_API_KEY" in st.secrets:
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    
+    if st.button("Generate Investment Memo with Gemini"):
+        with st.spinner("Gemini is analyzing the deal..."):
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            
+            # This is the prompt we send to Gemini under the hood
+            prompt = f"""
+            Act as a Senior Real Estate Investment Analyst. Write a concise, professional 3-paragraph investment summary for a property located at {address}.
+            
+            Here are the deal metrics to analyze:
+            - Purchase Price: ${purchase_price:,.0f}
+            - Project Levered IRR: {deal_irr:.2%}
+            - LP (Investor) IRR: {lp_irr:.2%}
+            - GP (Sponsor) IRR: {gp_irr:.2%}
+            - Year 1 DSCR: {year_1_dscr:.2f}x
+            - Hold Period: {hold_period} years
+            
+            Paragraph 1: Executive Summary & Location context.
+            Paragraph 2: Financial Analysis (discuss the IRR, DSCR risk, and LP/GP alignment).
+            Paragraph 3: Final Recommendation (Go / No-Go based on these numbers).
+            """
+            
+            response = model.generate_content(prompt)
+            st.write(response.text)
+else:
+    st.warning("⚠️ Please add your GEMINI_API_KEY to the Streamlit Secrets dashboard to use this feature.")
+
+st.divider()
+
 st.subheader("Waterfall Cash Flows")
-# Format for viewing
 display_df = df_waterfall[['Levered_CF', 'LP_Cash_Flow', 'GP_Cash_Flow']].style.format("${:,.0f}")
 st.dataframe(display_df)
 
-# Download to CSV Functionality
 @st.cache_data
 def convert_df(df):
     return df.to_csv(index=True).encode('utf-8')
@@ -159,9 +190,3 @@ st.download_button(
     file_name='Deal_Underwriting_Export.csv',
     mime='text/csv',
 )
-
-st.divider()
-
-st.subheader("LP vs GP Distributions Over Time")
-chart_data = df_waterfall[['LP_Cash_Flow', 'GP_Cash_Flow']]
-st.bar_chart(chart_data)
