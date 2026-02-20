@@ -3,6 +3,7 @@ import pandas as pd
 import numpy_financial as npf
 from geopy.geocoders import Nominatim
 import google.generativeai as genai
+from datetime import datetime
 
 st.set_page_config(layout="wide")
 
@@ -228,13 +229,18 @@ if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
     
     if st.button("Generate Investment Memo"):
-        with st.spinner("Jack is analyzing your deal..."):
+        with with st.spinner("Jack is analyzing your deal..."):
             model = genai.GenerativeModel('gemini-2.5-flash')
+            
+            # 1. Grab today's real date
+            current_date = datetime.now().strftime("%B %d, %Y")
             
             abatement_text = f"The deal includes a tax abatement saving ${abatement_savings:,.0f}/year for {abatement_years} years." if has_abatement else "No tax abatements are modeled."
             
             prompt = f"""
             Act as a Principal at a Private Equity Real Estate firm. Write a highly professional, 3-paragraph Investment Committee (IC) Memo for a property located at {address}.
+            
+            The current date is {current_date}. Make sure the memo reflects this date.
             
             Here is the institutional underwriting data:
             - Purchase Price: ${purchase_price:,.0f} | CapEx/Construction Budget: ${capex_budget:,.0f}
@@ -255,7 +261,12 @@ if "GEMINI_API_KEY" in st.secrets:
             """
             
             response = model.generate_content(prompt)
-            st.write(response.text)
+            
+            # 2. THE FIX: We add a backslash before every dollar sign so Streamlit 
+            # treats it as normal text instead of a math equation!
+            safe_text = response.text.replace('$', '\$')
+            
+            st.write(safe_text)
 else:
     st.warning("⚠️ Please add your GEMINI_API_KEY to the Streamlit Secrets dashboard to use this feature.")
 
