@@ -229,7 +229,7 @@ if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
     
     if st.button("Generate Investment Memo"):
-        with with st.spinner("Jack is analyzing your deal..."):
+        with st.spinner("Jack is analyzing your deal..."):
             model = genai.GenerativeModel('gemini-2.5-flash')
             
             # 1. Grab today's real date
