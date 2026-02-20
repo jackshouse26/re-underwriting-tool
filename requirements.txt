@@ -4,3 +4,4 @@ numpy-financial
 geopy
 google-generativeai
 PyPDF2
+fpdf
