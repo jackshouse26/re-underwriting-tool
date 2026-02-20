@@ -3,3 +3,4 @@ pandas
 numpy-financial
 geopy
 google-generativeai
+PyPDF2
