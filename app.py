@@ -6,19 +6,17 @@ import google.generativeai as genai
 from datetime import datetime
 
 # --- UI UPGRADE: Page Config & Custom CSS ---
-st.set_page_config(page_title="Wes Magic RE Underwriter", page_icon="🏢", layout="wide")
+st.set_page_config(page_title="Real Estate Underwriting Pro", page_icon="🏢", layout="wide")
 
 st.markdown("""
 <style>
-    /* Make the metric boxes look like elevated cards */
     div[data-testid="metric-container"] {
-        background-color: #1A1C24; /* Dark sleek background */
+        background-color: #1A1C24; 
         border: 1px solid #2D303E;
         padding: 15px;
         border-radius: 8px;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
-    /* Style the tabs to look more professional */
     .stTabs [data-baseweb="tab-list"] {
         gap: 20px;
     }
@@ -43,7 +41,7 @@ with st.sidebar.expander("🏗️ 1. Acquisition & CapEx", expanded=True):
     hold_period_yrs = st.slider("Total Hold Period (Years)", 2, 10, 5)
 
 with st.sidebar.expander("🏢 2. Operations & Exit", expanded=False):
-    year_1_gpr = st.number_input("Year 1 Gross Rent ($)", value=500000, step=10000)
+    st.info("💡 Base Rent is now calculated from the Rent Roll tab!")
     income_growth = st.slider("Annual Income Growth (%)", 1.0, 10.0, 3.0, 0.5) / 100
     year_1_opex = st.number_input("Year 1 OpEx ($)", value=150000, step=5000)
     expense_growth = st.slider("Annual Expense Growth (%)", 1.0, 10.0, 3.0, 0.5) / 100
@@ -76,8 +74,9 @@ with st.sidebar.expander("🌊 4. Equity Waterfall", expanded=False):
     tier_2_gp_split = st.slider("Tier 2 GP Promote (%)", 10, 50, 20, 5) / 100
     tier_3_gp_split = st.slider("Tier 3 GP Promote (%)", 20, 60, 40, 5) / 100
 
+
 # --- 2. ENGINE: MONTHLY CASH FLOW & FINANCING ---
-def run_monthly_model():
+def run_monthly_model(calc_year_1_gpr):
     total_months = hold_period_yrs * 12
     df = pd.DataFrame(index=range(0, total_months + 1))
     
@@ -102,7 +101,7 @@ def run_monthly_model():
     df.loc[0, 'Const_Balance'] = current_const_balance
     
     for m in range(1, total_months + 1):
-        current_gpr = year_1_gpr * ((1 + income_growth) ** (m/12))
+        current_gpr = calc_year_1_gpr * ((1 + income_growth) ** (m/12))
         current_opex = year_1_opex * ((1 + expense_growth) ** (m/12))
         
         if has_abatement and m <= (abatement_years * 12):
@@ -125,7 +124,7 @@ def run_monthly_model():
             df.loc[m, 'Levered_CF'] = noi - capex + draw - interest
         
         elif m == refi_month + 1:
-            forward_12m_noi = sum([ (year_1_gpr * ((1 + income_growth) ** ((m+i)/12)) - 
+            forward_12m_noi = sum([ (calc_year_1_gpr * ((1 + income_growth) ** ((m+i)/12)) - 
                                    (year_1_opex * ((1 + expense_growth) ** ((m+i)/12)))) / 12 for i in range(12)])
             property_value = forward_12m_noi / exit_cap_rate
             perm_loan_amount = property_value * perm_ltv
@@ -146,7 +145,7 @@ def run_monthly_model():
             df.loc[m, 'Levered_CF'] = noi - interest
             
     exit_m = total_months
-    forward_12m_noi = sum([ (year_1_gpr * ((1 + income_growth) ** ((exit_m+i)/12)) - 
+    forward_12m_noi = sum([ (calc_year_1_gpr * ((1 + income_growth) ** ((exit_m+i)/12)) - 
                            (year_1_opex * ((1 + expense_growth) ** ((exit_m+i)/12)))) / 12 for i in range(12)])
     gross_sales_price = forward_12m_noi / exit_cap_rate
     net_proceeds = gross_sales_price * 0.98 
@@ -206,8 +205,32 @@ def run_monthly_waterfall(df, total_equity):
 
     return df, lp_invest, gp_invest
 
-# --- 4. EXECUTION ---
-df_model, initial_equity, total_uses, total_sources, is_balanced = run_monthly_model()
+# --- 4. THE UI DASHBOARD & EXECUTION ---
+st.title("🏢 Wes's Secret Underwriting Tool")
+
+# Create the Tabs
+tab1, tab2, tab3 = st.tabs(["📊 Executive Dashboard", "🗓️ Monthly Pro Forma", "🔑 Rent Roll"])
+
+# We must process Tab 3 first so the Engine has the rent data!
+with tab3:
+    st.subheader("🔑 Interactive Rent Roll")
+    st.write("Edit the unit mix below. You can add rows, delete rows, or change rent amounts. The engine will instantly recalculate the entire deal based on these numbers.")
+    
+    default_units = pd.DataFrame([
+        {"Unit Type": "1 Bed / 1 Bath", "Count": 10, "Sq Ft": 750, "Monthly Rent ($)": 1200},
+        {"Unit Type": "2 Bed / 2 Bath", "Count": 5, "Sq Ft": 1000, "Monthly Rent ($)": 1600},
+        {"Unit Type": "Studio", "Count": 2, "Sq Ft": 500, "Monthly Rent ($)": 900}
+    ])
+    
+    # st.data_editor creates the Excel-like table
+    edited_rr = st.data_editor(default_units, num_rows="dynamic", use_container_width=True)
+    
+    # Calculate the dynamic Gross Potential Rent (GPR)
+    dynamic_gpr = (edited_rr["Count"] * edited_rr["Monthly Rent ($)"] * 12).sum()
+    st.info(f"**Total Calculated Year 1 Gross Potential Rent (GPR):** \${dynamic_gpr:,.0f}")
+
+# RUN THE MATH ENGINE USING THE NEW DYNAMIC GPR
+df_model, initial_equity, total_uses, total_sources, is_balanced = run_monthly_model(dynamic_gpr)
 df_wf, lp_invest, gp_invest = run_monthly_waterfall(df_model, initial_equity)
 
 try:
@@ -223,18 +246,12 @@ lev_moic = df_wf['Levered_CF'][df_wf['Levered_CF'] > 0].sum() / initial_equity
 lp_moic = df_wf['LP_Cash_Flow'][df_wf['LP_Cash_Flow'] > 0].sum() / lp_invest if lp_invest > 0 else 0
 gp_moic = df_wf['GP_Cash_Flow'][df_wf['GP_Cash_Flow'] > 0].sum() / gp_invest if gp_invest > 0 else 0
 
-# --- 5. THE NEW UI DASHBOARD ---
-st.title("🏢 Wes's Secret Underwriting Tool")
-
-if is_balanced:
-    st.success(f"✅ Capital Stack Balanced | Total Sources: ${total_sources:,.0f} | Total Uses: ${total_uses:,.0f}")
-else:
-    st.error(f"❌ Warning: Sources (${total_sources:,.0f}) do not match Uses (${total_uses:,.0f}).")
-
-# Create the Tabs
-tab1, tab2, tab3 = st.tabs(["📊 Executive Dashboard", "🗓️ Monthly Pro Forma", "🔑 Rent Roll (Coming Soon)"])
-
 with tab1:
+    if is_balanced:
+        st.success(f"✅ Capital Stack Balanced | Total Sources: ${total_sources:,.0f} | Total Uses: ${total_uses:,.0f}")
+    else:
+        st.error(f"❌ Warning: Sources (${total_sources:,.0f}) do not match Uses (${total_uses:,.0f}).")
+        
     st.subheader("Return Matrix")
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("1. Unlevered Deal", f"{unlev_irr:.2%}", f"{unlev_moic:.2f}x MoIC")
@@ -302,7 +319,3 @@ with tab2:
     st.download_button(label="📥 Export to Excel (CSV)", data=csv_data, file_name='Deal_Underwriting_Export.csv', mime='text/csv')
     
     st.dataframe(df_wf.style.format("${:,.0f}"), height=600)
-
-with tab3:
-    st.subheader("🔑 Interactive Rent Roll (In Development)")
-    st.write("This tab will eventually house our dynamic unit mix table, replacing the static 'Year 1 Gross Rent' assumption with bottom-up property data.")
