@@ -76,9 +76,14 @@ def run_model_engine(assumptions, gpr_total, p_price_override=None, e_cap_overri
         irr = (1 + npf.irr(df['Levered_CF']))**12 - 1
         if pd.isna(irr) or irr < -0.99: irr = -1.0
     except: irr = -1.0
-    
+
+    try:
+        unlev_irr = (1 + npf.irr(df['Unlevered_CF']))**12 - 1
+        if pd.isna(unlev_irr) or unlev_irr < -0.99: unlev_irr = -1.0
+    except: unlev_irr = -1.0
+
     dscr = (last_noi * 12) / (df['Debt_Service'].max() * 12) if df['Debt_Service'].max() > 0 else 0
-    return irr, dscr, df, initial_equity, total_cost
+    return irr, dscr, df, initial_equity, total_cost, unlev_irr
 
 
 def run_monte_carlo(assumptions, gpr_total, iterations=250):
@@ -87,7 +92,6 @@ def run_monte_carlo(assumptions, gpr_total, iterations=250):
     base_growth = assumptions['income_growth']
     
     # Generate 250 random variations of our core assumptions
-    np.random.seed(42) # Keeps the randomizer consistent
     cap_rates = np.random.normal(loc=base_cap, scale=0.005, size=iterations) # +/- 50 bps
     perm_rates = np.random.normal(loc=base_rate, scale=0.005, size=iterations) # +/- 50 bps
     income_growths = np.random.normal(loc=base_growth, scale=0.01, size=iterations) # +/- 1%
@@ -102,7 +106,7 @@ def run_monte_carlo(assumptions, gpr_total, iterations=250):
         sim_assumptions['income_growth'] = income_growths[i]
         
         # Run the core engine using the mutated assumptions
-        irr, _, _, _, _ = run_model_engine(sim_assumptions, gpr_total)
+        irr, _, _, _, _, _ = run_model_engine(sim_assumptions, gpr_total)
         results.append(irr)
         
     return [r for r in results if r > -0.99] # Return all non-total-loss scenarios

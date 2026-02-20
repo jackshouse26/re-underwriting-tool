@@ -6,7 +6,7 @@ from geopy.geocoders import Nominatim
 import math_engine
 import ai_agent
 import pdf_generator
-# import live_data # Uncomment this if you are using the live rates API!
+import live_data
 
 st.set_page_config(page_title="Real Estate Underwriting Pro", page_icon="🏢", layout="wide")
 
@@ -45,6 +45,11 @@ if "om_opex" not in st.session_state: st.session_state.om_opex = 150000
 if "om_cap" not in st.session_state: st.session_state.om_cap = 5.5
 
 API_KEY = st.secrets["GEMINI_API_KEY"] if "GEMINI_API_KEY" in st.secrets else None
+
+# Live Treasury-based rate defaults (cached hourly)
+_live_const_pct, _live_perm_pct = live_data.get_live_rates()
+live_const_default = max(4.0, min(15.0, round(_live_const_pct, 1)))
+live_perm_default  = max(3.0, min(12.0, round(_live_perm_pct,  1)))
 
 # --- SIDEBAR INPUTS ---
 st.sidebar.title("🏢 Deal Assumptions")
@@ -93,11 +98,12 @@ with st.sidebar.expander("🏢 2. Operations & Exit", expanded=False):
     exit_cap_rate = st.sidebar.slider("Exit Cap Rate (%)", 4.0, 10.0, float(st.session_state.om_cap), 0.1) / 100
 
 with st.sidebar.expander("🏦 3. Debt Financing", expanded=False):
+    st.caption(f"⚡ Live: SOFR+350bps = **{live_const_default:.1f}%** const | 10yr+200bps = **{live_perm_default:.1f}%** perm")
     const_ltv = st.slider("Const. Loan-to-Cost (%)", 0.0, 85.0, 65.0, 1.0) / 100
-    const_rate = st.slider("Const. Interest Rate (%)", 4.0, 15.0, 8.0, 0.1) / 100
+    const_rate = st.slider("Const. Interest Rate (%)", 4.0, 15.0, live_const_default, 0.1) / 100
     refi_month = st.slider("Refinance Month", const_months, hold_period_yrs * 12, const_months)
     perm_ltv = st.slider("Perm Loan-to-Value (%)", 0.0, 80.0, 65.0, 1.0) / 100
-    perm_rate = st.slider("Perm Interest Rate (%)", 3.0, 12.0, 5.5, 0.1) / 100
+    perm_rate = st.slider("Perm Interest Rate (%)", 3.0, 12.0, live_perm_default, 0.1) / 100
 
 assumptions = {
     "purchase_price": purchase_price, "capex_budget": capex_budget, "const_months": const_months,
@@ -133,17 +139,27 @@ with tab3:
             st.rerun()
 
 # RUN ENGINE VIA MODULE (Now using the sidebar's active_gpr!)
-lev_irr, dscr, df_wf, init_eq, tot_cost = math_engine.run_model_engine(assumptions, st.session_state.active_gpr)
+lev_irr, dscr, df_wf, init_eq, tot_cost, unlev_irr = math_engine.run_model_engine(assumptions, st.session_state.active_gpr)
 max_debt_service = df_wf['Debt_Service'].max() * 12
 breakeven_occ = (max_debt_service + year_1_opex) / st.session_state.active_gpr if st.session_state.active_gpr > 0 else 0
 
+# MOIC: total equity returned / total equity invested
+_lev = df_wf['Levered_CF']
+_invested = _lev[_lev < 0].abs().sum()
+_returned = _lev[_lev > 0].sum()
+moic = _returned / _invested if _invested > 0 else 0
+
 with tab1:
     st.subheader("Key Deal Metrics")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Levered IRR", f"{lev_irr:.2%}" if lev_irr > -1 else "Loss")
-    c2.metric("Year 1 DSCR", f"{dscr:.2f}x", delta="Target: 1.25x")
-    c3.metric("Breakeven Occ.", f"{breakeven_occ:.1%}", delta="Risk Metric", delta_color="inverse")
-    c4.metric("Equity Required", f"USD {init_eq:,.0f}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Levered IRR",   f"{lev_irr:.2%}"   if lev_irr   > -1 else "Loss")
+    c2.metric("Unlevered IRR", f"{unlev_irr:.2%}" if unlev_irr > -1 else "Loss")
+    c3.metric("MOIC", f"{moic:.2f}x")
+
+    c4, c5, c6 = st.columns(3)
+    c4.metric("Year 1 DSCR", f"{dscr:.2f}x", delta="Target: 1.25x")
+    c5.metric("Breakeven Occ.", f"{breakeven_occ:.1%}", delta="Risk Metric", delta_color="inverse")
+    c6.metric("Equity Required", f"USD {init_eq:,.0f}")
     
     st.divider()
     col_chart, col_map = st.columns([2, 1])
