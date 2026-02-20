@@ -41,16 +41,17 @@ def run_model_engine(assumptions, gpr_total, p_price_override=None, e_cap_overri
     
     current_bal = p_price * const_ltv
     m_draw = (loan_max - (p_price * const_ltv)) / const_months if const_months > 0 else 0
-    
+
     last_noi = 0
-    
+    perm_payment = 0.0  # fixed monthly P&I, set at refi; reused in subsequent months
+
     for m in range(1, total_months + 1):
         noi = ((gpr_total * ((1 + income_growth)**(m/12))) - (year_1_opex * ((1 + expense_growth)**(m/12)))) / 12
         if has_abatement and m <= (abatement_years * 12): noi += (abatement_savings / 12)
-        
+
         last_noi = noi
         df.loc[m, 'Unlevered_CF'] = noi
-        
+
         if m <= refi_month:
             ds = current_bal * (const_rate / 12)
             draw = m_draw if m <= const_months else 0
@@ -60,15 +61,22 @@ def run_model_engine(assumptions, gpr_total, p_price_override=None, e_cap_overri
         elif m == refi_month + 1:
             p_val = (noi * 12) / e_cap
             p_amt = p_val * perm_ltv
-            ds = p_amt * perm_rate / 12
-            df.loc[m, 'Levered_CF'] = noi + (p_amt - current_bal) - ds
-            df.loc[m, 'Perm_Balance'], df.loc[m, 'Debt_Service'] = p_amt, ds
+            # 30-year amortizing schedule; npf.pmt returns a negative number for a payment
+            perm_payment = float(-npf.pmt(perm_rate / 12, 360, p_amt))
+            interest = p_amt * perm_rate / 12
+            new_bal = p_amt - (perm_payment - interest)
+            df.loc[m, 'Levered_CF'] = noi + (p_amt - current_bal) - perm_payment
+            df.loc[m, 'Perm_Balance'] = new_bal
+            df.loc[m, 'Debt_Service'] = perm_payment
             current_bal = 0
         else:
             p_bal = df.loc[m-1, 'Perm_Balance']
-            ds = p_bal * perm_rate / 12
-            df.loc[m, 'Perm_Balance'], df.loc[m, 'Debt_Service'] = p_bal, ds
-            df.loc[m, 'Levered_CF'] = noi - ds
+            interest = p_bal * perm_rate / 12
+            principal = perm_payment - interest
+            new_bal = max(0.0, p_bal - principal)
+            df.loc[m, 'Perm_Balance'] = new_bal
+            df.loc[m, 'Debt_Service'] = perm_payment
+            df.loc[m, 'Levered_CF'] = noi - perm_payment
 
     exit_noi = ((gpr_total * ((1 + income_growth)**((total_months+1)/12))) - (year_1_opex * ((1 + expense_growth)**((total_months+1)/12))))
     exit_val = (exit_noi / e_cap) * (1 - exit_costs_pct)
