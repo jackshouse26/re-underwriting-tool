@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy_financial as npf
+import numpy as np # <-- Moved to the top!
 
 def run_model_engine(assumptions, gpr_total, p_price_override=None, e_cap_override=None):
     # Unpack assumptions (use overrides for sensitivity matrix)
@@ -71,13 +72,14 @@ def run_model_engine(assumptions, gpr_total, p_price_override=None, e_cap_overri
     df.loc[total_months, 'Levered_CF'] += (exit_val - df.loc[total_months, 'Perm_Balance'])
     
     try:
-        irr = (1 + npf.irr(df['Levered_CF'], guess=0.1))**12 - 1
+        # THE FIX: Removed guess=0.1
+        irr = (1 + npf.irr(df['Levered_CF']))**12 - 1
         if pd.isna(irr) or irr < -0.99: irr = -1.0
     except: irr = -1.0
     
     dscr = (last_noi * 12) / (df['Debt_Service'].max() * 12) if df['Debt_Service'].max() > 0 else 0
     return irr, dscr, df, initial_equity, total_cost
-import numpy as np # Add this to the very top of your file if it isn't there!
+
 
 def run_monte_carlo(assumptions, gpr_total, iterations=250):
     base_cap = assumptions['exit_cap_rate']
