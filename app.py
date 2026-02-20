@@ -4,6 +4,8 @@ import numpy_financial as npf
 from geopy.geocoders import Nominatim
 import google.generativeai as genai
 from datetime import datetime
+import PyPDF2
+import json
 
 # --- UI UPGRADE: Page Config & Custom CSS ---
 st.set_page_config(page_title="Real Estate Underwriting Pro", page_icon="🏢", layout="wide")
@@ -29,6 +31,15 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+# --- SESSION STATE INITIALIZATION ---
+# This gives the app a "memory" so it doesn't overwrite the AI's work when you click a button
+if "rent_roll_data" not in st.session_state:
+    st.session_state.rent_roll_data = pd.DataFrame([
+        {"Unit Type": "1 Bed / 1 Bath", "Count": 10, "Sq Ft": 750, "Monthly Rent ($)": 1200},
+        {"Unit Type": "2 Bed / 2 Bath", "Count": 5, "Sq Ft": 1000, "Monthly Rent ($)": 1600},
+        {"Unit Type": "Studio", "Count": 2, "Sq Ft": 500, "Monthly Rent ($)": 900}
+    ])
 
 # --- 1. UI: THE SIDEBAR (INPUTS) ---
 st.sidebar.title("🏢 Deal Assumptions")
@@ -208,26 +219,63 @@ def run_monthly_waterfall(df, total_equity):
 # --- 4. THE UI DASHBOARD & EXECUTION ---
 st.title("🏢 Wes's Secret Underwriting Tool")
 
-# Create the Tabs
 tab1, tab2, tab3 = st.tabs(["📊 Executive Dashboard", "🗓️ Monthly Pro Forma", "🔑 Rent Roll"])
 
-# We must process Tab 3 first so the Engine has the rent data!
 with tab3:
-    st.subheader("🔑 Interactive Rent Roll")
-    st.write("Edit the unit mix below. You can add rows, delete rows, or change rent amounts. The engine will instantly recalculate the entire deal based on these numbers.")
+    col_a, col_b = st.columns([1, 2])
     
-    default_units = pd.DataFrame([
-        {"Unit Type": "1 Bed / 1 Bath", "Count": 10, "Sq Ft": 750, "Monthly Rent ($)": 1200},
-        {"Unit Type": "2 Bed / 2 Bath", "Count": 5, "Sq Ft": 1000, "Monthly Rent ($)": 1600},
-        {"Unit Type": "Studio", "Count": 2, "Sq Ft": 500, "Monthly Rent ($)": 900}
-    ])
-    
-    # st.data_editor creates the Excel-like table
-    edited_rr = st.data_editor(default_units, num_rows="dynamic", use_container_width=True)
-    
-    # Calculate the dynamic Gross Potential Rent (GPR)
-    dynamic_gpr = (edited_rr["Count"] * edited_rr["Monthly Rent ($)"] * 12).sum()
-    st.info(f"**Total Calculated Year 1 Gross Potential Rent (GPR):** \${dynamic_gpr:,.0f}")
+    with col_a:
+        st.subheader("📄 Rent Roll Extraction")
+        st.write("Upload a broker PDF. Jack will extract, group, and average the unit data automatically.")
+        uploaded_file = st.file_uploader("Upload PDF Rent Roll", type="pdf")
+        
+        if uploaded_file is not None:
+            if st.button("Extract Data", type="primary"):
+                if "GEMINI_API_KEY" in st.secrets:
+                    with st.spinner("Reading PDF and extracting data..."):
+                        # Read PDF text
+                        reader = PyPDF2.PdfReader(uploaded_file)
+                        pdf_text = ""
+                        for page in reader.pages:
+                            pdf_text += page.extract_text() + "\n"
+                        
+                        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                        model = genai.GenerativeModel('gemini-2.5-flash')
+                        
+                        prompt = f"""
+                        You are a real estate analyst. Extract the rent roll data from the following PDF text. 
+                        Group the units by "Unit Type" (e.g., 1 Bed / 1 Bath, Studio, 2 Bed). 
+                        For each group, provide the "Count" (total number of units of that type), the average "Sq Ft", and the average "Monthly Rent ($)".
+                        
+                        Return EXACTLY a raw JSON array of objects. Do not include markdown blocks like ```json.
+                        Example format: [{{"Unit Type": "1 Bed", "Count": 10, "Sq Ft": 750, "Monthly Rent ($)": 1500}}]
+                        
+                        Text:
+                        {pdf_text}
+                        """
+                        try:
+                            response = model.generate_content(prompt)
+                            raw_json = response.text.strip()
+                            if raw_json.startswith("```json"):
+                                raw_json = raw_json[7:-3]
+                            elif raw_json.startswith("```"):
+                                raw_json = raw_json[3:-3]
+                                
+                            extracted_data = json.loads(raw_json)
+                            # Update the app's memory with the new data!
+                            st.session_state.rent_roll_data = pd.DataFrame(extracted_data)
+                            st.rerun()
+                        except Exception as e:
+                            st.error("Failed to parse the PDF cleanly. Ensure the document is readable text.")
+                else:
+                    st.warning("⚠️ Add GEMINI_API_KEY to Streamlit Secrets to use AI Extraction.")
+
+    with col_b:
+        st.subheader("🔑 Interactive Rent Roll")
+        edited_rr = st.data_editor(st.session_state.rent_roll_data, num_rows="dynamic", use_container_width=True)
+        
+        dynamic_gpr = (edited_rr["Count"] * edited_rr["Monthly Rent ($)"] * 12).sum()
+        st.info(f"**Total Calculated Year 1 Gross Potential Rent (GPR):** \${dynamic_gpr:,.0f}")
 
 # RUN THE MATH ENGINE USING THE NEW DYNAMIC GPR
 df_model, initial_equity, total_uses, total_sources, is_balanced = run_monthly_model(dynamic_gpr)
