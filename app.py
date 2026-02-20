@@ -5,50 +5,77 @@ from geopy.geocoders import Nominatim
 import google.generativeai as genai
 from datetime import datetime
 
-st.set_page_config(layout="wide")
+# --- UI UPGRADE: Page Config & Custom CSS ---
+st.set_page_config(page_title="Wes Magic RE Underwriter", page_icon="🏢", layout="wide")
+
+st.markdown("""
+<style>
+    /* Make the metric boxes look like elevated cards */
+    div[data-testid="metric-container"] {
+        background-color: #1A1C24; /* Dark sleek background */
+        border: 1px solid #2D303E;
+        padding: 15px;
+        border-radius: 8px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    /* Style the tabs to look more professional */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 20px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        white-space: pre-wrap;
+        background-color: transparent;
+        border-radius: 4px 4px 0px 0px;
+        padding: 10px 20px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # --- 1. UI: THE SIDEBAR (INPUTS) ---
-st.sidebar.header("Property Details")
+st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/1/14/Building_icon.svg/1024px-Building_icon.svg.png", width=50)
+st.sidebar.title("Deal Assumptions")
 address = st.sidebar.text_input("Property Address", "11 Wall Street, New York, NY")
 
-st.sidebar.header("1. Deal Assumptions")
-purchase_price = st.sidebar.number_input("Purchase Price ($)", value=5000000, step=100000)
-capex_budget = st.sidebar.number_input("Construction / CapEx ($)", value=1200000, step=50000)
-const_months = st.sidebar.slider("Construction Duration (Months)", 0, 24, 12)
-hold_period_yrs = st.sidebar.slider("Total Hold Period (Years)", 2, 10, 5)
+with st.sidebar.expander("🏗️ 1. Acquisition & CapEx", expanded=True):
+    purchase_price = st.number_input("Purchase Price ($)", value=5000000, step=100000)
+    capex_budget = st.number_input("Construction / CapEx ($)", value=1200000, step=50000)
+    const_months = st.slider("Construction Duration (Months)", 0, 24, 12)
+    hold_period_yrs = st.slider("Total Hold Period (Years)", 2, 10, 5)
 
-st.sidebar.header("2. Operations")
-year_1_gpr = st.sidebar.number_input("Year 1 Gross Rent ($)", value=500000, step=10000)
-income_growth = st.sidebar.slider("Annual Income Growth (%)", 1.0, 10.0, 3.0, 0.5) / 100
-year_1_opex = st.sidebar.number_input("Year 1 OpEx ($)", value=150000, step=5000)
-expense_growth = st.sidebar.slider("Annual Expense Growth (%)", 1.0, 10.0, 3.0, 0.5) / 100
+with st.sidebar.expander("🏢 2. Operations & Exit", expanded=False):
+    year_1_gpr = st.number_input("Year 1 Gross Rent ($)", value=500000, step=10000)
+    income_growth = st.slider("Annual Income Growth (%)", 1.0, 10.0, 3.0, 0.5) / 100
+    year_1_opex = st.number_input("Year 1 OpEx ($)", value=150000, step=5000)
+    expense_growth = st.slider("Annual Expense Growth (%)", 1.0, 10.0, 3.0, 0.5) / 100
+    
+    st.divider()
+    has_abatement = st.checkbox("Apply Tax Abatement?")
+    abatement_savings, abatement_years = 0, 0
+    if has_abatement:
+        abatement_savings = st.number_input("Annual Tax Savings ($)", value=50000, step=5000)
+        abatement_years = st.slider("Abatement Duration (Years)", 1, 10, 5)
+    
+    st.divider()
+    exit_cap_rate = st.slider("Exit Cap Rate (%)", 4.0, 10.0, 5.5, 0.1) / 100
 
-st.sidebar.subheader("Tax Abatement")
-has_abatement = st.sidebar.checkbox("Apply Tax Abatement?")
-abatement_savings = 0
-abatement_years = 0
-if has_abatement:
-    abatement_savings = st.sidebar.number_input("Annual Tax Savings ($)", value=50000, step=5000)
-    abatement_years = st.sidebar.slider("Abatement Duration (Years)", 1, 10, 5)
-exit_cap_rate = st.sidebar.slider("Exit Cap Rate (%)", 4.0, 10.0, 5.5, 0.1) / 100
+with st.sidebar.expander("🏦 3. Debt Financing", expanded=False):
+    st.write("**Construction Loan**")
+    const_ltv = st.slider("Const. Loan-to-Cost (%)", 0.0, 85.0, 65.0, 1.0) / 100
+    const_rate = st.slider("Const. Interest Rate (%)", 4.0, 12.0, 8.0, 0.1) / 100
+    st.divider()
+    st.write("**Permanent Loan (Refi)**")
+    refi_month = st.slider("Refinance Month", const_months, hold_period_yrs * 12, const_months)
+    perm_ltv = st.slider("Perm Loan-to-Value (%)", 0.0, 80.0, 65.0, 1.0) / 100
+    perm_rate = st.slider("Perm Interest Rate (%)", 3.0, 10.0, 5.5, 0.1) / 100
 
-st.sidebar.header("3. Debt Financing")
-st.sidebar.subheader("Construction Loan")
-const_ltv = st.sidebar.slider("Const. Loan-to-Cost (%)", 0.0, 85.0, 65.0, 1.0) / 100
-const_rate = st.sidebar.slider("Const. Interest Rate (%)", 4.0, 12.0, 8.0, 0.1) / 100
-
-st.sidebar.subheader("Permanent Loan (Refi)")
-refi_month = st.sidebar.slider("Refinance Month", const_months, hold_period_yrs * 12, const_months)
-perm_ltv = st.sidebar.slider("Perm Loan-to-Value (%)", 0.0, 80.0, 65.0, 1.0) / 100
-perm_rate = st.sidebar.slider("Perm Interest Rate (%)", 3.0, 10.0, 5.5, 0.1) / 100
-
-st.sidebar.header("4. Equity Waterfall")
-lp_contrib = st.sidebar.slider("LP Equity Contribution (%)", 50, 100, 90) / 100
-gp_contrib = 1.0 - lp_contrib
-tier_1_hurdle = st.sidebar.slider("Tier 1 Hurdle (Pref %)", 5.0, 15.0, 8.0, 0.5) / 100
-tier_2_hurdle = st.sidebar.slider("Tier 2 Hurdle (%)", 10.0, 25.0, 15.0, 0.5) / 100
-tier_2_gp_split = st.sidebar.slider("Tier 2 GP Promote (%)", 10, 50, 20, 5) / 100
-tier_3_gp_split = st.sidebar.slider("Tier 3 GP Promote (%)", 20, 60, 40, 5) / 100
+with st.sidebar.expander("🌊 4. Equity Waterfall", expanded=False):
+    lp_contrib = st.slider("LP Equity Contribution (%)", 50, 100, 90) / 100
+    gp_contrib = 1.0 - lp_contrib
+    tier_1_hurdle = st.slider("Tier 1 Hurdle (Pref %)", 5.0, 15.0, 8.0, 0.5) / 100
+    tier_2_hurdle = st.slider("Tier 2 Hurdle (%)", 10.0, 25.0, 15.0, 0.5) / 100
+    tier_2_gp_split = st.slider("Tier 2 GP Promote (%)", 10, 50, 20, 5) / 100
+    tier_3_gp_split = st.slider("Tier 3 GP Promote (%)", 20, 60, 40, 5) / 100
 
 # --- 2. ENGINE: MONTHLY CASH FLOW & FINANCING ---
 def run_monthly_model():
@@ -180,16 +207,9 @@ def run_monthly_waterfall(df, total_equity):
 
     return df, lp_invest, gp_invest
 
-# --- 4. EXECUTION & UI DASHBOARD ---
-st.title("Institutional Real Estate Model (Monthly)")
-
+# --- 4. EXECUTION ---
 df_model, initial_equity, total_uses, total_sources, is_balanced = run_monthly_model()
 df_wf, lp_invest, gp_invest = run_monthly_waterfall(df_model, initial_equity)
-
-if is_balanced:
-    st.success(f"✅ Sources & Uses Balanced! Total Capital: ${total_uses:,.0f}")
-else:
-    st.error(f"❌ Warning: Sources (${total_sources:,.0f}) do not match Uses (${total_uses:,.0f}).")
 
 try:
     unlev_irr = (1 + npf.irr(df_wf['Unlevered_CF']))**12 - 1
@@ -204,85 +224,85 @@ lev_moic = df_wf['Levered_CF'][df_wf['Levered_CF'] > 0].sum() / initial_equity
 lp_moic = df_wf['LP_Cash_Flow'][df_wf['LP_Cash_Flow'] > 0].sum() / lp_invest if lp_invest > 0 else 0
 gp_moic = df_wf['GP_Cash_Flow'][df_wf['GP_Cash_Flow'] > 0].sum() / gp_invest if gp_invest > 0 else 0
 
-try:
-    geolocator = Nominatim(user_agent="re_underwriting_app")
-    location = geolocator.geocode(address)
-    if location:
-        map_data = pd.DataFrame({'lat': [location.latitude], 'lon': [location.longitude]})
-        st.map(map_data, zoom=15)
-except:
-    st.info("Enter a valid address in the sidebar to view the property map.")
+# --- 5. THE NEW UI DASHBOARD ---
+st.title("🏢 Institutional Underwriting Platform")
 
-st.subheader("Return Matrix")
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("1. Unlevered Deal", f"{unlev_irr:.2%}", f"{unlev_moic:.2f}x MoIC", delta_color="off")
-col2.metric("2. Levered Deal", f"{lev_irr:.2%}", f"{lev_moic:.2f}x MoIC", delta_color="off")
-col3.metric("3. LP Returns", f"{lp_irr:.2%}", f"{lp_moic:.2f}x MoIC", delta_color="off")
-col4.metric("4. GP Returns", f"{gp_irr:.2%}", f"{gp_moic:.2f}x MoIC", delta_color="off")
-
-st.divider()
-
-# --- 5. AI INTEGRATION: GEMINI INVESTMENT MEMO ---
-st.subheader("Investment Memo")
-
-if "GEMINI_API_KEY" in st.secrets:
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    
-    if st.button("Generate Investment Memo"):
-        with st.spinner("Jack is analyzing your deal..."):
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            
-            # 1. Grab today's real date
-            current_date = datetime.now().strftime("%B %d, %Y")
-            
-            abatement_text = f"The deal includes a tax abatement saving ${abatement_savings:,.0f}/year for {abatement_years} years." if has_abatement else "No tax abatements are modeled."
-            
-            prompt = f"""
-            Act as a Principal at a Private Equity Real Estate firm. Write a highly professional, 3-paragraph Investment Committee (IC) Memo for a property located at {address}.
-            
-            The current date is {current_date}. Make sure the memo reflects this date.
-            
-            Here is the institutional underwriting data:
-            - Purchase Price: ${purchase_price:,.0f} | CapEx/Construction Budget: ${capex_budget:,.0f}
-            - Total Capitalization (Sources): ${total_sources:,.0f}
-            - Construction Loan: {const_ltv*100}% LTC at {const_rate*100}% interest.
-            - Permanent Refinance: Refinancing in month {refi_month} at {perm_ltv*100}% LTV and {perm_rate*100}% interest.
-            - {abatement_text}
-            
-            Returns Profile ({hold_period_yrs}-Year Hold):
-            - Deal Level Levered IRR: {lev_irr:.2%} ({lev_moic:.2f}x MoIC)
-            - LP (Investor) IRR: {lp_irr:.2%} ({lp_moic:.2f}x MoIC)
-            - GP (Sponsor) IRR: {gp_irr:.2%} ({gp_moic:.2f}x MoIC)
-            
-            Format the memo exactly like this:
-            **1. Executive Summary & Capital Stack:** Provide an executive framing. Set the stage by identifying the opportunity at the location and detailing the total capitalization. 
-            **2. Business Plan & Financing:** Explain the transition from the construction/renovation draw phase into stabilized permanent financing. Explicitly mention the tax abatement impact if one exists. 
-            **3. Return Profile & Recommendation:** Discuss the LP vs. GP alignment based on the waterfall returns, highlight the power of the leverage used, and give a definitive "Go / No-Go" recommendation for the committee.
-            """
-            
-            response = model.generate_content(prompt)
-            
-            # 2. THE FIX: We add a backslash before every dollar sign so Streamlit 
-            # treats it as normal text instead of a math equation!
-            safe_text = response.text.replace('$', '\$')
-            
-            st.write(safe_text)
+if is_balanced:
+    st.success(f"✅ Capital Stack Balanced | Total Sources: ${total_sources:,.0f} | Total Uses: ${total_uses:,.0f}")
 else:
-    st.warning("⚠️ Please add your GEMINI_API_KEY to the Streamlit Secrets dashboard to use this feature.")
+    st.error(f"❌ Warning: Sources (${total_sources:,.0f}) do not match Uses (${total_uses:,.0f}).")
 
-st.divider()
+# Create the Tabs
+tab1, tab2, tab3 = st.tabs(["📊 Executive Dashboard", "🗓️ Monthly Pro Forma", "🔑 Rent Roll (Coming Soon)"])
 
-st.subheader("Monthly Cash Flow Timeline")
-st.dataframe(df_wf.style.format("${:,.0f}"))
+with tab1:
+    st.subheader("Return Matrix")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("1. Unlevered Deal", f"{unlev_irr:.2%}", f"{unlev_moic:.2f}x MoIC")
+    col2.metric("2. Levered Deal", f"{lev_irr:.2%}", f"{lev_moic:.2f}x MoIC")
+    col3.metric("3. LP Returns", f"{lp_irr:.2%}", f"{lp_moic:.2f}x MoIC")
+    col4.metric("4. GP Returns", f"{gp_irr:.2%}", f"{gp_moic:.2f}x MoIC")
 
-@st.cache_data
-def convert_df(df):
-    return df.to_csv(index=True).encode('utf-8')
+    st.divider()
+    
+    col_chart, col_map = st.columns([2, 1])
+    with col_chart:
+        st.write("**LP vs GP Cash Flow Timeline**")
+        st.bar_chart(df_wf[['LP_Cash_Flow', 'GP_Cash_Flow']])
+    
+    with col_map:
+        st.write("**Property Location**")
+        try:
+            geolocator = Nominatim(user_agent="re_underwriting_app")
+            location = geolocator.geocode(address)
+            if location:
+                map_data = pd.DataFrame({'lat': [location.latitude], 'lon': [location.longitude]})
+                st.map(map_data, zoom=14)
+        except:
+            st.info("Map unavailable. Check address.")
 
-csv_data = convert_df(df_wf)
-st.download_button(
-    label="📥 Download Pro Forma (CSV)",
-    data=csv_data,
-    file_name='Deal_Underwriting_Export.csv',
-    mime='text/csv',
-)
+    st.divider()
+    
+    st.subheader("Investment Memo")
+    if "GEMINI_API_KEY" in st.secrets:
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        if st.button("Generate Investment Committee Memo", type="primary"):
+            with st.spinner("Jack is analyzing the underwriting and writing the memo..."):
+                model = genai.GenerativeModel('gemini-2.5-flash')
+                current_date = datetime.now().strftime("%B %d, %Y")
+                abatement_text = f"The deal includes a tax abatement saving ${abatement_savings:,.0f}/year for {abatement_years} years." if has_abatement else "No tax abatements are modeled."
+                
+                prompt = f"""
+                Act as a Principal at a Private Equity Real Estate firm. Write a highly professional, 3-paragraph Investment Committee (IC) Memo for a property located at {address}. The date is {current_date}.
+                
+                Data: Purchase: ${purchase_price:,.0f} | CapEx: ${capex_budget:,.0f} | Capitalization: ${total_sources:,.0f} | Const Loan: {const_ltv*100}% LTC at {const_rate*100}% | Refi: Month {refi_month} at {perm_ltv*100}% LTV and {perm_rate*100}%. {abatement_text}
+                
+                Returns: Deal Levered IRR: {lev_irr:.2%} | LP IRR: {lp_irr:.2%} | GP IRR: {gp_irr:.2%}
+                
+                Format:
+                **1. Executive Summary & Capital Stack:** Context, location, and capitalization.
+                **2. Business Plan & Financing:** Transition from construction to permanent financing, plus abatement impact.
+                **3. Return Profile & Recommendation:** LP vs GP alignment, leverage impact, and Go/No-Go recommendation.
+                """
+                
+                response = model.generate_content(prompt)
+                safe_text = response.text.replace('$', '\$')
+                st.info(safe_text)
+    else:
+        st.warning("⚠️ Add GEMINI_API_KEY to Streamlit Secrets to use AI.")
+
+with tab2:
+    st.subheader("🗓️ Complete Monthly Pro Forma")
+    
+    @st.cache_data
+    def convert_df(df):
+        return df.to_csv(index=True).encode('utf-8')
+
+    csv_data = convert_df(df_wf)
+    st.download_button(label="📥 Export to Excel (CSV)", data=csv_data, file_name='Deal_Underwriting_Export.csv', mime='text/csv')
+    
+    st.dataframe(df_wf.style.format("${:,.0f}"), height=600)
+
+with tab3:
+    st.subheader("🔑 Interactive Rent Roll (In Development)")
+    st.write("This tab will eventually house our dynamic unit mix table, replacing the static 'Year 1 Gross Rent' assumption with bottom-up property data.")
