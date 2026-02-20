@@ -141,15 +141,15 @@ col4.metric("Year 1 DSCR", f"{year_1_dscr:.2f}x", f"{dscr_indicator} Target: 1.2
 st.divider()
 
 # --- 5. AI INTEGRATION: GEMINI INVESTMENT MEMO ---
-st.subheader("✨ AI Investment Memo")
+st.subheader("Investment Memo")
 
 # Check if the API key is safely stored in Streamlit secrets
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
     
-    if st.button("Generate Investment Memo with Gemini"):
-        with st.spinner("Gemini is analyzing the deal..."):
-            model = genai.GenerativeModel('gemini-1.5-flash')
+    if st.button("Generate Investment Memo"):
+        with st.spinner("Jack is analyzing the deal..."):
+            model = genai.GenerativeModel('gemini-2.5-flash')
             
             # This is the prompt we send to Gemini under the hood
             prompt = f"""
