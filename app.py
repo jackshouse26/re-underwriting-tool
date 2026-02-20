@@ -6,6 +6,7 @@ import google.generativeai as genai
 from datetime import datetime
 import PyPDF2
 import json
+from fpdf import FPDF
 
 # --- UI UPGRADE: Page Config & Custom CSS ---
 st.set_page_config(page_title="Real Estate Underwriting Pro", page_icon="🏢", layout="wide")
@@ -40,7 +41,6 @@ if "rent_roll_data" not in st.session_state:
         {"Unit Type": "Studio", "Count": 2, "Sq Ft": 500, "Current Rent ($)": 900, "Market Rent ($)": 1050}
     ])
 else:
-    # BUG FIX: Automatically upgrade old session states so we don't get a KeyError!
     if "Monthly Rent ($)" in st.session_state.rent_roll_data.columns:
         st.session_state.rent_roll_data.rename(columns={"Monthly Rent ($)": "Current Rent ($)"}, inplace=True)
         if "Market Rent ($)" not in st.session_state.rent_roll_data.columns:
@@ -48,6 +48,9 @@ else:
 
 if "saved_deals" not in st.session_state:
     st.session_state.saved_deals = []
+
+if "memo_text" not in st.session_state:
+    st.session_state.memo_text = ""
 
 # --- 1. UI: THE SIDEBAR (INPUTS) ---
 st.sidebar.title("🏢 Deal Assumptions")
@@ -172,14 +175,11 @@ with tab3:
                     st.session_state.rent_roll_data = pd.DataFrame(json.loads(raw_json)); st.rerun()
     with col_b:
         edited_rr = st.data_editor(st.session_state.rent_roll_data, num_rows="dynamic", use_container_width=True)
-        # Dynamic Rent column selection based on sidebar toggle
         rent_col = "Market Rent ($)" if use_market_rents and "Market Rent ($)" in edited_rr.columns else "Current Rent ($)"
         dynamic_gpr = (edited_rr["Count"] * edited_rr[rent_col] * 12).sum()
         st.info(f"**Total Calculated Year 1 Gross Potential Rent (GPR):** \${dynamic_gpr:,.0f}")
 
-# Run deal math for current inputs
 lev_irr, dscr, df_wf, init_eq, tot_cost = run_model_engine(purchase_price, exit_cap_rate, dynamic_gpr)
-
 max_debt_service = df_wf['Debt_Service'].max() * 12
 breakeven_occ = (max_debt_service + year_1_opex) / dynamic_gpr if dynamic_gpr > 0 else 0
 
@@ -204,7 +204,6 @@ with tab1:
             if loc: st.map(pd.DataFrame({'lat':[loc.latitude], 'lon':[loc.longitude]}), zoom=14)
         except: st.info("Map unavailable.")
         
-        # --- PHASE 3: NEIGHBORHOOD CONTEXT ---
         if st.button("🏙️ AI Neighborhood Context"):
              if "GEMINI_API_KEY" in st.secrets:
                  with st.spinner("Researching local market drivers..."):
@@ -214,14 +213,63 @@ with tab1:
                      st.info(model.generate_content(context_prompt).text)
 
     st.divider()
-    if st.button("✨ Generate Investment Memo", type="primary"):
-        if "GEMINI_API_KEY" in st.secrets:
-            with st.spinner("Jack is analyzing your deal..."):
-                genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-                model = genai.GenerativeModel('gemini-2.5-flash')
-                rent_type = "Market Rents" if use_market_rents else "Current In-Place Rents"
-                prompt = f"Write 3-para IC Memo for {address}. Date: {datetime.now().strftime('%B %d, %Y')}. Underwritten to: {rent_type}. IRR: {lev_irr:.2%}. DSCR: {dscr:.2f}. No $ symbols, use USD."
-                st.info(model.generate_content(prompt).text)
+    
+    # --- PHASE 4: PDF REPORT GENERATION ---
+    col_memo, col_pdf = st.columns([3, 1])
+    with col_memo:
+        if st.button("✨ Generate Investment Memo", type="primary"):
+            if "GEMINI_API_KEY" in st.secrets:
+                with st.spinner("Jack is analyzing your deal..."):
+                    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                    model = genai.GenerativeModel('gemini-2.5-flash')
+                    rent_type = "Market Rents" if use_market_rents else "Current In-Place Rents"
+                    prompt = f"Write 3-para IC Memo for {address}. Date: {datetime.now().strftime('%B %d, %Y')}. Underwritten to: {rent_type}. IRR: {lev_irr:.2%}. DSCR: {dscr:.2f}. No $ symbols, use USD. Plain text only, no markdown bolding."
+                    response = model.generate_content(prompt)
+                    st.session_state.memo_text = response.text.replace("*", "") # Clean up markdown for PDF
+                    st.rerun()
+
+    if st.session_state.memo_text:
+        st.info(st.session_state.memo_text)
+        with col_pdf:
+            # Generate the PDF Document
+            pdf = FPDF()
+            pdf.add_page()
+            pdf.set_font("Arial", 'B', 16)
+            pdf.cell(200, 10, txt="Investment Committee Summary", ln=True, align='C')
+            pdf.ln(10)
+            
+            # Add Metrics to PDF
+            pdf.set_font("Arial", 'B', 12)
+            pdf.cell(200, 10, txt=f"Property: {address}", ln=True)
+            pdf.set_font("Arial", '', 11)
+            pdf.cell(200, 8, txt=f"Purchase Price: USD {purchase_price:,.0f}", ln=True)
+            pdf.cell(200, 8, txt=f"Equity Required: USD {init_eq:,.0f}", ln=True)
+            pdf.cell(200, 8, txt=f"Levered IRR: {lev_irr:.2%}", ln=True)
+            pdf.cell(200, 8, txt=f"Year 1 DSCR: {dscr:.2f}x", ln=True)
+            pdf.cell(200, 8, txt=f"Breakeven Occupancy: {breakeven_occ:.1%}", ln=True)
+            pdf.ln(10)
+            
+            # Add AI Memo to PDF
+            pdf.set_font("Arial", 'B', 12)
+            pdf.cell(200, 10, txt="Sponsor Rationale & Business Plan:", ln=True)
+            pdf.set_font("Arial", '', 11)
+            pdf.multi_cell(0, 6, txt=st.session_state.memo_text)
+            
+            # Output PDF to bytes
+            try:
+                # FPDF1 returns a string, encode to latin-1
+                pdf_bytes = pdf.output(dest='S').encode('latin-1')
+            except AttributeError:
+                # FPDF2 returns a bytearray natively
+                pdf_bytes = pdf.output()
+
+            st.download_button(
+                label="📥 Download PDF Package",
+                data=pdf_bytes,
+                file_name=f"IC_Memo_{address.replace(' ', '_')}.pdf",
+                mime="application/pdf",
+                type="primary"
+            )
 
 with tab4:
     st.subheader("📈 Levered IRR Sensitivity Analysis")
